@@ -1,0 +1,12 @@
+{
+  "name": "tahiry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gestion de stock et caisse offline-first, synchronisée entre navigateur et mobile.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node server/start.mjs",
+    "test": "node --test \"tests/*.test.mjs\""
+  }
+}
