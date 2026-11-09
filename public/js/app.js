@@ -1,0 +1,542 @@
+// Interface Tahiry : vues rendues depuis la base locale, jamais depuis le réseau.
+import { store } from './store.js';
+import { syncNow, startSync, syncState, onSyncState } from './sync.js';
+import {
+  newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
+  buildTransfer, buildInventory,
+} from './domain.js';
+
+// --- Rendu : toute valeur interpolée est échappée, y compris les données synchronisées.
+class Safe { constructor(s) { this.s = s; } toString() { return this.s; } }
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const fmtVal = (v) => (v instanceof Safe ? v.s : Array.isArray(v) ? v.map(fmtVal).join('')
+  : v === null || v === undefined || v === false ? '' : esc(v));
+const html = (strings, ...vals) => new Safe(strings.reduce((out, s, i) => out + fmtVal(vals[i - 1]) + s));
+
+const $ = (sel) => document.querySelector(sel);
+const num = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 3 });
+const ar = (n) => `${num.format(Math.round(n))} Ar`;
+const dt = (ms) => new Date(ms).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+
+const icon = (d) => new Safe(`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`);
+const ROUTES = {
+  dashboard: ['Tableau de bord', 'M3 13h8V3H3zM13 21h8V11h-8zM13 3v4h8V3zM3 21h8v-4H3z'],
+  pos: ['Caisse', 'M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h3'],
+  articles: ['Articles', 'M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8'],
+  movements: ['Mouvements', 'M7 4v15M7 19l-4-4M7 19l4-4M17 20V5M17 5l-4 4M17 5l4 4'],
+  inventory: ['Inventaire', 'M9 4h6v3H9zM6 5h3M15 5h3v16H6V5M9 12l2 2 4-4'],
+  sales: ['Ventes', 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6'],
+  partners: ['Partenaires', 'M16 19c0-3-2-5-5-5s-5 2-5 5M11 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M17 11a3 3 0 0 0 0-6M21 19c0-2-1-4-3-4.500'],
+  settings: ['Réglages', 'M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4M14 4h4v4h-4zM6 10h4v4H6zM12 16h4v4h-4z'],
+};
+
+const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null };
+let renderPending = false;
+
+const route = () => { const r = location.hash.slice(1); return ROUTES[r] ? r : 'dashboard'; };
+const articles = () => store.list('articles').sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+const depots = () => store.list('depots').sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+const partners = (kind) => store.list('partners').filter((p) => !kind || p.kind === kind).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+const stock = () => computeStock(store.list('movements'));
+const seller = () => store.meta.seller || 'Appareil';
+const currentDepot = () => {
+  const d = store.meta.depotId;
+  if (store.get('depots', d)) return d;
+  return store.get('depots', 'depot-principal') ? 'depot-principal' : depots()[0]?.id;
+};
+const rawName = (c, id) => store.data[c].get(id)?.data.name ?? '—';
+const options = (list, selected) => list.map((o) => html`<option value="${o.id}" ${selected === o.id ? new Safe('selected') : ''}>${o.name}</option>`);
+const depotSelect = (act) => html`<select aria-label="Dépôt" data-change="${act}">${options(depots(), currentDepot())}</select>`;
+
+// --- Formulaire générique en boîte de dialogue
+function openForm({ title, fields, values = {}, submit = 'Enregistrer', onSubmit }) {
+  const dlg = $('#dlg');
+  const control = (f) => {
+    const v = values[f.name] ?? f.value ?? '';
+    if (f.type === 'select') {
+      return html`<select name="${f.name}" ${f.required ? new Safe('required') : ''}>
+        ${f.options.map((o) => html`<option value="${o.value}" ${String(v) === String(o.value) ? new Safe('selected') : ''}>${o.label}</option>`)}</select>`;
+    }
+    return html`<input name="${f.name}" type="${f.type ?? 'text'}" value="${v}" ${f.required ? new Safe('required') : ''}
+      ${f.type === 'number' ? new Safe(`step="any" min="${f.min ?? 0}"`) : ''} autocomplete="off">`;
+  };
+  dlg.innerHTML = html`<form method="dialog"><h2>${title}</h2>
+    ${fields.map((f) => html`<label class="field"><span>${f.label}</span>${control(f)}</label>`)}
+    <p class="error" hidden></p>
+    <div class="row"><button class="btn" type="button" data-act="closeDlg">Annuler</button>
+    <button class="btn primary" type="submit">${submit}</button></div></form>`;
+  dlg.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const out = {};
+    for (const f of fields) {
+      const raw = e.target.elements[f.name].value.trim();
+      out[f.name] = f.type === 'number' ? (raw === '' ? 0 : Number(raw)) : raw;
+    }
+    try {
+      await onSubmit(out);
+      dlg.close();
+      render();
+    } catch (err) {
+      const box = dlg.querySelector('.error');
+      box.textContent = err.message;
+      box.hidden = false;
+    }
+  });
+  dlg.showModal();
+}
+
+// --- Vues
+const views = {
+  dashboard() {
+    const st = stock();
+    const list = articles();
+    const value = list.reduce((s, a) => s + stockTotal(st, a.id) * (a.cost || 0), 0);
+    const today = new Date().setHours(0, 0, 0, 0);
+    const todaySales = store.list('sales').filter((s) => s.at >= today && !s.cancelled);
+    const low = list.filter((a) => { const q = stockTotal(st, a.id); return q >= 0 && q <= (a.min || 0); });
+    const negative = [];
+    for (const a of list) for (const d of depots()) {
+      const q = stockAt(st, a.id, d.id);
+      if (q < 0) negative.push({ a, d, q });
+    }
+    const recent = store.list('movements').sort((a, b) => b.at - a.at).slice(0, 8);
+    if (!list.length) {
+      return html`<div class="card empty"><p>Aucun article pour le moment.</p>
+        <div class="row" style="justify-content:center">
+        <a class="btn primary" href="#articles" style="text-decoration:none">Créer un article</a>
+        <button class="btn" data-act="demo">Charger des données de démo</button></div></div>`;
+    }
+    return html`<div class="kpis">
+      <div class="card kpi"><div class="label">Ventes du jour</div><div class="value">${ar(todaySales.reduce((s, v) => s + v.total, 0))}</div><div class="muted small">${todaySales.length} ticket(s)</div></div>
+      <div class="card kpi"><div class="label">Valeur du stock (au coût)</div><div class="value">${ar(value)}</div><div class="muted small">${list.length} article(s)</div></div>
+      <div class="card kpi"><div class="label">À réapprovisionner</div><div class="value ${low.length ? 'alert' : ''}">${low.length}</div><div class="muted small">sous le seuil minimum</div></div>
+      <div class="card kpi"><div class="label">Écarts à vérifier</div><div class="value ${negative.length ? 'alert' : ''}">${negative.length}</div><div class="muted small">stock négatif après synchro</div></div>
+    </div>
+    <div class="columns">
+      <section class="card"><h2>Réapprovisionnement</h2>${[...negative.map(({ a, d, q }) => html`<div class="totals"><span>${a.name} <span class="muted small">· ${d.name}</span></span><span class="badge danger">${num.format(q)}</span></div>`),
+        ...low.slice(0, 10).map((a) => html`<div class="totals"><span>${a.name}</span><span class="badge warn">${num.format(stockTotal(st, a.id))} / min ${num.format(a.min || 0)}</span></div>`)]}
+        ${!low.length && !negative.length ? html`<p class="muted">Aucune alerte.</p>` : ''}</section>
+      <section class="card"><h2>Derniers mouvements</h2>${recent.map((m) => html`<div class="totals"><span>${rawName('articles', m.articleId)} <span class="muted small">· ${m.type}</span></span><span class="num">${m.qty > 0 ? '+' : ''}${num.format(m.qty)}</span></div>`)}</section>
+    </div>`;
+  },
+
+  pos() {
+    return html`<div class="pos"><div>
+      <div class="toolbar"><input class="grow" id="pos-search" data-filter="pos" placeholder="Rechercher ou scanner un code-barres" value="${state.posQuery}" autocomplete="off">${depotSelect('setDepot')}</div>
+      <div class="products" id="pos-list">${posList()}</div></div>
+      <aside class="card cart" id="cart">${cartView()}</aside></div>`;
+  },
+
+  articles() {
+    return html`<div class="toolbar"><input class="grow" data-filter="articles" placeholder="Rechercher un article" value="${state.articleQuery}" autocomplete="off">
+      <button class="btn primary" data-act="articleNew">Nouvel article</button>
+      <button class="btn" data-act="exportCsv">Exporter CSV</button></div>
+      <div id="articles-list">${articlesTable()}</div>`;
+  },
+
+  movements() {
+    const rows = store.list('movements').sort((a, b) => b.at - a.at).slice(0, 200);
+    const noArticle = !articles().length;
+    return html`<div class="toolbar">
+      <button class="btn primary" data-act="moveNew" data-kind="entree" ${noArticle ? new Safe('disabled') : ''}>Entrée</button>
+      <button class="btn" data-act="moveNew" data-kind="sortie" ${noArticle ? new Safe('disabled') : ''}>Sortie</button>
+      <button class="btn" data-act="transferNew" ${noArticle || depots().length < 2 ? new Safe('disabled') : ''}>Transfert</button></div>
+      ${rows.length ? html`<div class="table-wrap"><table><thead><tr><th>Date</th><th>Article</th><th>Dépôt</th><th>Type</th><th class="num">Quantité</th><th>Référence</th><th>Par</th></tr></thead><tbody>
+      ${rows.map((m) => html`<tr><td class="small">${dt(m.at)}</td><td>${rawName('articles', m.articleId)}</td><td>${rawName('depots', m.depotId)}</td><td><span class="badge">${m.type}</span></td><td class="num">${m.qty > 0 ? '+' : ''}${num.format(m.qty)}</td><td class="small">${m.ref || m.note}</td><td class="small">${m.by}</td></tr>`)}
+      </tbody></table></div>` : html`<div class="card empty">Aucun mouvement enregistré.</div>`}`;
+  },
+
+  inventory() {
+    const st = stock();
+    const depot = currentDepot();
+    const list = articles();
+    return html`<div class="toolbar">${depotSelect('setDepotInv')}<span class="grow muted small">Saisissez les quantités comptées. Les lignes vides sont ignorées.</span>
+      <button class="btn primary" data-act="inventorySave" ${list.length ? '' : new Safe('disabled')}>Valider l’inventaire</button></div>
+      ${list.length ? html`<div class="table-wrap"><table><thead><tr><th>Article</th><th class="num">Théorique</th><th style="width:130px">Compté</th><th class="num">Écart</th></tr></thead><tbody>
+      ${list.map((a) => { const q = stockAt(st, a.id, depot); return html`<tr><td>${a.name}</td><td class="num">${num.format(q)}</td><td><input type="number" step="any" min="0" inputmode="decimal" aria-label="Quantité comptée de ${a.name}" data-count="${a.id}" data-theory="${q}" value="${state.counts[a.id] ?? ''}"></td><td class="num" id="gap-${a.id}">${gapText(a.id, q)}</td></tr>`; })}
+      </tbody></table></div>` : html`<div class="card empty">Créez d’abord des articles.</div>`}`;
+  },
+
+  sales() {
+    const rows = store.list('sales').sort((a, b) => b.at - a.at).slice(0, 200);
+    if (!rows.length) return html`<div class="card empty">Aucune vente enregistrée.</div>`;
+    return html`<div class="table-wrap"><table><thead><tr><th>Date</th><th>N°</th><th>Paiement</th><th>Vendeur</th><th class="num">Total</th><th></th></tr></thead><tbody>
+      ${rows.map((s) => html`<tr><td class="small">${dt(s.at)}</td><td class="small">${s.number}</td><td>${s.payment}</td><td class="small">${s.by}</td>
+        <td class="num">${ar(s.total)} ${s.cancelled ? html`<span class="badge danger">annulée</span>` : ''}</td>
+        <td class="actions"><button class="btn small" data-act="ticket" data-id="${s.id}">Ticket</button>
+        ${s.cancelled ? '' : html`<button class="btn small danger" data-act="saleCancel" data-id="${s.id}">Annuler</button>`}</td></tr>`)}
+      </tbody></table></div>`;
+  },
+
+  partners() {
+    const rows = partners();
+    return html`<div class="toolbar"><button class="btn primary" data-act="partnerNew">Nouveau partenaire</button></div>
+      ${rows.length ? html`<div class="table-wrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Téléphone</th><th></th></tr></thead><tbody>
+      ${rows.map((p) => html`<tr><td>${p.name}</td><td><span class="badge">${p.kind === 'client' ? 'Client' : 'Fournisseur'}</span></td><td>${p.phone}</td>
+        <td class="actions"><button class="btn small" data-act="partnerEdit" data-id="${p.id}">Modifier</button>
+        <button class="btn small danger" data-act="partnerDelete" data-id="${p.id}">Supprimer</button></td></tr>`)}
+      </tbody></table></div>` : html`<div class="card empty">Aucun client ni fournisseur.</div>`}`;
+  },
+
+  settings() {
+    const m = store.meta;
+    return html`<div class="settings">
+      <section class="card"><h2>Synchronisation</h2><form id="sync-form">
+        <label class="field"><span>Nom du vendeur sur cet appareil</span><input name="seller" value="${m.seller ?? ''}" autocomplete="off"></label>
+        <label class="field"><span>Adresse du serveur (vide = ce site)</span><input name="serverUrl" type="url" value="${m.serverUrl ?? ''}" placeholder="${location.origin}" autocomplete="off"></label>
+        <label class="field"><span>Clé de synchronisation</span><input name="token" type="password" value="${m.token ?? ''}" autocomplete="off"></label>
+        <div class="row"><button class="btn primary" type="submit">Enregistrer et synchroniser</button></div></form>
+        <p class="muted small">En attente d’envoi : <span id="pending-count">${store.outboxCount}</span> · Appareil ${m.deviceId}</p></section>
+      <section class="card"><h2>Dépôts</h2>${depots().map((d) => html`<div class="totals"><span>${d.name}</span><button class="btn small" data-act="depotEdit" data-id="${d.id}">Renommer</button></div>`)}
+        <div class="row"><button class="btn" data-act="depotNew">Ajouter un dépôt</button></div></section>
+      <section class="card"><h2>Application</h2><div class="row" style="justify-content:flex-start">
+        ${state.installEvent ? html`<button class="btn primary" data-act="install">Installer l’application</button>` : ''}
+        <button class="btn" data-act="demo">Charger des données de démo</button></div></section></div>`;
+  },
+};
+
+function posList() {
+  const q = state.posQuery.toLowerCase();
+  const st = stock();
+  const depot = currentDepot();
+  const list = articles().filter((a) => !q || a.name.toLowerCase().includes(q) || (a.code || '').toLowerCase().includes(q)).slice(0, 60);
+  if (!list.length) return html`<div class="empty">Aucun article trouvé.</div>`;
+  return list.map((a) => html`<button class="product" data-act="cartAdd" data-id="${a.id}"><strong>${a.name}</strong>
+    <span class="num">${ar(a.price || 0)}</span><br><span class="muted small">Stock : ${num.format(stockAt(st, a.id, depot))} ${a.unit}</span></button>`);
+}
+
+function cartView() {
+  const lines = [...state.cart.values()];
+  const st = stock();
+  const depot = currentDepot();
+  const totals = saleTotals(lines, state.discount);
+  const pay = ['Espèces', 'MVola', 'Orange Money', 'Airtel Money', 'Carte', 'Chèque'];
+  return html`<h2>Panier</h2>
+    ${lines.length ? lines.map((l) => html`<div class="cart-line"><div>${l.name}<div class="muted small">${ar(l.price)}</div>
+      ${l.qty > stockAt(st, l.articleId, depot) ? html`<div class="short">Stock insuffisant</div>` : ''}</div>
+      <input type="number" step="any" min="0" inputmode="decimal" aria-label="Quantité de ${l.name}" data-cart="${l.articleId}" value="${l.qty}">
+      <button class="btn small" data-act="cartRemove" data-id="${l.articleId}" aria-label="Retirer ${l.name}">×</button></div>`) : html`<p class="muted">Touchez un article pour l’ajouter.</p>`}
+    <div class="stack">
+      <label class="field"><span>Remise (Ar)</span><input type="number" min="0" step="1" inputmode="numeric" id="discount" value="${state.discount || ''}"></label>
+      <label class="field"><span>Paiement</span><select id="payment">${pay.map((p) => html`<option ${p === state.payment ? new Safe('selected') : ''}>${p}</option>`)}</select></label>
+      <label class="field"><span>Client (facultatif)</span><select id="partner"><option value="">Client de passage</option>${options(partners('client'), state.partnerId)}</select></label>
+    </div>
+    <div class="totals"><span class="muted">Sous-total</span><span class="num">${ar(totals.subtotal)}</span></div>
+    <div class="totals grand"><span>Total</span><span class="num" id="cart-total">${ar(totals.total)}</span></div>
+    <button class="btn primary" style="width:100%" data-act="checkout" ${lines.length ? '' : new Safe('disabled')}>Encaisser</button>`;
+}
+
+function articlesTable() {
+  const q = state.articleQuery.toLowerCase();
+  const st = stock();
+  const list = articles().filter((a) => !q || a.name.toLowerCase().includes(q) || (a.code || '').toLowerCase().includes(q) || (a.category || '').toLowerCase().includes(q));
+  if (!list.length) return html`<div class="card empty">Aucun article.</div>`;
+  return html`<div class="table-wrap"><table><thead><tr><th>Article</th><th>Catégorie</th><th>Code</th><th class="num">Coût</th><th class="num">Prix</th><th class="num">Stock</th><th></th></tr></thead><tbody>
+    ${list.map((a) => { const q2 = stockTotal(st, a.id); return html`<tr><td>${a.name}</td><td>${a.category}</td><td class="small">${a.code}</td><td class="num">${ar(a.cost || 0)}</td><td class="num">${ar(a.price || 0)}</td>
+      <td class="num">${num.format(q2)} ${a.unit} ${q2 <= (a.min || 0) ? html`<span class="badge warn">bas</span>` : ''}</td>
+      <td class="actions"><button class="btn small" data-act="articleEdit" data-id="${a.id}">Modifier</button>
+      <button class="btn small danger" data-act="articleDelete" data-id="${a.id}">Supprimer</button></td></tr>`; })}
+    </tbody></table></div>`;
+}
+
+function gapText(id, theory) {
+  const v = state.counts[id];
+  if (v === undefined || v === '') return '';
+  const gap = Math.round((Number(v) - theory) * 1000) / 1000;
+  return `${gap > 0 ? '+' : ''}${num.format(gap)}`;
+}
+
+// --- Rendu général
+function render() {
+  renderPending = false;
+  const r = route();
+  $('#title').textContent = ROUTES[r][0];
+  $('#nav').innerHTML = html`<div class="brand">Tahiry</div>${Object.entries(ROUTES).map(([k, [label, d]]) => html`<a href="#${k}" ${k === r ? new Safe('aria-current="page"') : ''}>${icon(d)}<span>${label}</span></a>`)}`;
+  $('#view').innerHTML = views[r]();
+  renderChip();
+}
+
+// Une synchro en arrière-plan ne doit pas effacer une saisie en cours.
+function safeRender() {
+  const active = document.activeElement;
+  if ($('#dlg').open || (active && active.matches('main input, main select, main textarea'))) {
+    renderPending = true;
+    return;
+  }
+  render();
+}
+
+function renderChip() {
+  const n = store.outboxCount;
+  const pending = n ? ` · ${n} en attente` : '';
+  const labels = {
+    idle: ['', 'Prêt'], syncing: ['warn', 'Synchronisation…'], ok: ['ok', 'Synchronisé'],
+    offline: ['warn', 'Hors ligne'], unconfigured: ['', 'Local uniquement'], error: ['err', syncState.message],
+  };
+  const [cls, text] = labels[syncState.status];
+  $('#sync-chip').innerHTML = html`<span class="dot ${cls}"></span>${text}${pending}`;
+  $('#sync-chip').title = syncState.lastSync ? `Dernière synchro : ${syncState.lastSync.toLocaleTimeString('fr-FR')}` : 'Synchroniser maintenant';
+  const count = $('#pending-count');
+  if (count) count.textContent = n;
+}
+
+// --- Métier côté interface
+function articleForm(a = {}) {
+  openForm({
+    title: a.id ? 'Modifier l’article' : 'Nouvel article',
+    values: { unit: 'pièce', ...a },
+    fields: [
+      { name: 'name', label: 'Désignation', required: true },
+      { name: 'category', label: 'Catégorie' },
+      { name: 'code', label: 'Code-barres ou référence' },
+      { name: 'unit', label: 'Unité' },
+      { name: 'cost', label: 'Coût d’achat (Ar)', type: 'number' },
+      { name: 'price', label: 'Prix de vente (Ar)', type: 'number' },
+      { name: 'min', label: 'Seuil minimum', type: 'number' },
+    ],
+    onSubmit: (v) => store.save('articles', a.id ?? newId(), v),
+  });
+}
+
+function partnerForm(p = {}) {
+  openForm({
+    title: p.id ? 'Modifier le partenaire' : 'Nouveau partenaire',
+    values: p,
+    fields: [
+      { name: 'name', label: 'Nom', required: true },
+      { name: 'kind', label: 'Type', type: 'select', options: [{ value: 'client', label: 'Client' }, { value: 'fournisseur', label: 'Fournisseur' }] },
+      { name: 'phone', label: 'Téléphone', type: 'tel' },
+    ],
+    onSubmit: (v) => store.save('partners', p.id ?? newId(), v),
+  });
+}
+
+function depotForm(d = {}) {
+  openForm({
+    title: d.id ? 'Renommer le dépôt' : 'Nouveau dépôt',
+    values: d,
+    fields: [{ name: 'name', label: 'Nom', required: true }],
+    onSubmit: (v) => store.save('depots', d.id ?? newId(), v),
+  });
+}
+
+const articleOptions = () => articles().map((a) => ({ value: a.id, label: a.name }));
+const depotOptions = () => depots().map((d) => ({ value: d.id, label: d.name }));
+const positive = (qty) => { if (!(qty > 0)) throw new Error('La quantité doit être supérieure à zéro'); };
+
+function saleNumber() {
+  const tag = store.meta.deviceId.slice(0, 4).toUpperCase();
+  const d = new Date();
+  const day = `${String(d.getFullYear()).slice(2)}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  const n = store.list('sales').filter((s) => s.number.includes(`-${tag}-`)).length + 1;
+  return `V${day}-${tag}-${n}`;
+}
+
+function showTicket(sale) {
+  const dlg = $('#dlg');
+  dlg.innerHTML = html`<div id="ticket" class="ticket"><div class="center"><strong>Tahiry</strong><br>${sale.number}<br>${dt(sale.at)}</div><hr>
+    ${sale.lines.map((l) => html`<div class="line"><span>${num.format(l.qty)} × ${l.name}</span><span>${ar(l.price * l.qty)}</span></div>`)}<hr>
+    ${sale.discount ? html`<div class="line"><span>Remise</span><span>-${ar(sale.discount)}</span></div>` : ''}
+    <div class="line"><strong>TOTAL</strong><strong>${ar(sale.total)}</strong></div>
+    <div class="line"><span>Paiement</span><span>${sale.payment}</span></div>
+    <div class="line"><span>Vendeur</span><span>${sale.by}</span></div>
+    ${sale.cancelled ? html`<p class="center"><strong>VENTE ANNULÉE</strong></p>` : ''}</div>
+    <div class="row"><button class="btn" data-act="closeDlg">Fermer</button><button class="btn primary" data-act="print">Imprimer</button></div>`;
+  dlg.showModal();
+}
+
+async function loadDemo() {
+  const items = [
+    ['riz', 'Riz Makalioka 1 kg', 'Épicerie', '6200000000011', 'kg', 3200, 4000, 20, 120],
+    ['huile', 'Huile 1 L', 'Épicerie', '6200000000028', 'bouteille', 8500, 10500, 10, 40],
+    ['sucre', 'Sucre 1 kg', 'Épicerie', '6200000000035', 'kg', 4200, 5200, 10, 8],
+    ['savon', 'Savon de ménage', 'Hygiène', '6200000000042', 'pièce', 1500, 2200, 15, 60],
+    ['eau', 'Eau minérale 1,5 L', 'Boissons', '6200000000059', 'bouteille', 2200, 3000, 24, 96],
+    ['cahier', 'Cahier 100 pages', 'Papeterie', '6200000000066', 'pièce', 1800, 2800, 12, 30],
+  ];
+  const now = Date.now();
+  await store.write([
+    { c: 'depots', id: 'demo-tana', data: { name: 'Boutique Analakely' } },
+    { c: 'partners', id: 'demo-c1', data: { name: 'Épicerie Soa', kind: 'client', phone: '034 00 000 01' } },
+    { c: 'partners', id: 'demo-f1', data: { name: 'Grossiste Mahajanga', kind: 'fournisseur', phone: '032 00 000 02' } },
+    ...items.map(([id, name, category, code, unit, cost, price, min]) => ({ c: 'articles', id: `demo-${id}`, data: { name, category, code, unit, cost, price, min } })),
+    ...items.map(([id, , , , , , , , qty]) => ({ c: 'movements', id: `demo-init-${id}`, data: { articleId: `demo-${id}`, depotId: 'depot-principal', qty, type: 'entree', ref: 'Stock initial', note: '', by: 'Démo', at: now } })),
+  ]);
+  render();
+  syncNow();
+}
+
+function exportCsv() {
+  // Préfixe les cellules qui seraient interprétées comme formules par un tableur.
+  const cell = (v) => { let s = String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; return `"${s.replace(/"/g, '""')}"`; };
+  const st = stock();
+  const rows = [['Article', 'Catégorie', 'Code', 'Coût', 'Prix', ...depots().map((d) => d.name), 'Total']];
+  for (const a of articles()) rows.push([a.name, a.category, a.code, a.cost, a.price, ...depots().map((d) => stockAt(st, a.id, d.id)), stockTotal(st, a.id)]);
+  const blob = new Blob(['﻿' + rows.map((r) => r.map(cell).join(';')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'stock-tahiry.csv' });
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function addToCart(a) {
+  const line = state.cart.get(a.id);
+  if (line) line.qty += 1;
+  else state.cart.set(a.id, { articleId: a.id, name: a.name, price: a.price || 0, qty: 1 });
+  $('#cart').innerHTML = cartView();
+}
+
+const actions = {
+  sync: () => syncNow(),
+  closeDlg: () => $('#dlg').close(),
+  print: () => window.print(),
+  demo: loadDemo,
+  exportCsv,
+  install: async () => { await state.installEvent?.prompt(); state.installEvent = null; render(); },
+  articleNew: () => articleForm(),
+  articleEdit: ({ id }) => articleForm(store.get('articles', id)),
+  articleDelete: async ({ id }) => { if (confirm('Supprimer cet article ? Son historique de mouvements est conservé.')) { await store.remove('articles', id); render(); } },
+  partnerNew: () => partnerForm(),
+  partnerEdit: ({ id }) => partnerForm(store.get('partners', id)),
+  partnerDelete: async ({ id }) => { if (confirm('Supprimer ce partenaire ?')) { await store.remove('partners', id); render(); } },
+  depotNew: () => depotForm(),
+  depotEdit: ({ id }) => depotForm(store.get('depots', id)),
+  moveNew: ({ kind }) => openForm({
+    title: kind === 'entree' ? 'Entrée de stock' : 'Sortie de stock',
+    values: { depotId: currentDepot() },
+    fields: [
+      { name: 'articleId', label: 'Article', type: 'select', options: articleOptions(), required: true },
+      { name: 'depotId', label: 'Dépôt', type: 'select', options: depotOptions(), required: true },
+      { name: 'qty', label: 'Quantité', type: 'number', required: true },
+      ...(kind === 'entree' ? [{ name: 'partnerId', label: 'Fournisseur', type: 'select', options: [{ value: '', label: '—' }, ...partners('fournisseur').map((p) => ({ value: p.id, label: p.name }))] }] : []),
+      { name: 'note', label: 'Motif ou référence' },
+    ],
+    onSubmit: (v) => {
+      positive(v.qty);
+      return store.save('movements', newId(), { ...v, qty: kind === 'entree' ? v.qty : -v.qty, type: kind, ref: v.partnerId ? rawName('partners', v.partnerId) : '', by: seller(), at: Date.now() });
+    },
+  }),
+  transferNew: () => openForm({
+    title: 'Transfert entre dépôts',
+    fields: [
+      { name: 'articleId', label: 'Article', type: 'select', options: articleOptions(), required: true },
+      { name: 'fromDepot', label: 'Depuis', type: 'select', options: depotOptions(), required: true },
+      { name: 'toDepot', label: 'Vers', type: 'select', options: depotOptions(), required: true },
+      { name: 'qty', label: 'Quantité', type: 'number', required: true },
+      { name: 'note', label: 'Motif' },
+    ],
+    onSubmit: (v) => {
+      positive(v.qty);
+      return store.write(buildTransfer({ id: newId(), ...v, by: seller(), at: Date.now() }).map((m) => ({ c: 'movements', ...m })));
+    },
+  }),
+  inventorySave: async () => {
+    const counts = Object.fromEntries(Object.entries(state.counts).filter(([, v]) => v !== '').map(([k, v]) => [k, Number(v)]));
+    if (!Object.keys(counts).length) return alert('Saisissez au moins une quantité comptée.');
+    const moves = buildInventory({ id: newId(), depotId: currentDepot(), counts, stock: stock(), by: seller(), at: Date.now() });
+    if (!confirm(`${moves.length} écart(s) seront enregistrés. Continuer ?`)) return undefined;
+    if (moves.length) await store.write(moves.map((m) => ({ c: 'movements', ...m })));
+    state.counts = {};
+    render();
+    return undefined;
+  },
+  cartAdd: ({ id }) => { const a = store.get('articles', id); if (a) addToCart(a); },
+  cartRemove: ({ id }) => { state.cart.delete(id); $('#cart').innerHTML = cartView(); },
+  checkout: async () => {
+    const lines = [...state.cart.values()].filter((l) => l.qty > 0);
+    if (!lines.length) return;
+    const st = stock();
+    const depotId = currentDepot();
+    const short = lines.filter((l) => l.qty > stockAt(st, l.articleId, depotId));
+    if (short.length && !confirm(`Stock insuffisant pour : ${short.map((l) => l.name).join(', ')}.\nVendre quand même ?`)) return;
+    const id = newId();
+    const { sale, movements } = buildSale({ id, number: saleNumber(), lines, discount: state.discount, payment: state.payment, depotId, partnerId: state.partnerId, by: seller(), at: Date.now() });
+    await store.write([{ c: 'sales', id, data: sale }, ...movements.map((m) => ({ c: 'movements', ...m }))]);
+    Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', posQuery: '' });
+    render();
+    showTicket(sale);
+  },
+  ticket: ({ id }) => showTicket(store.get('sales', id)),
+  saleCancel: async ({ id }) => {
+    const { id: _ignored, ...sale } = store.get('sales', id);
+    if (!confirm(`Annuler la vente ${sale.number} ? Le stock sera recrédité.`)) return;
+    await store.write([
+      { c: 'sales', id, data: { ...sale, cancelled: true } },
+      ...buildCancellation(id, sale, seller(), Date.now()).map((m) => ({ c: 'movements', ...m })),
+    ]);
+    render();
+  },
+};
+
+// --- Événements délégués
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (el && !el.disabled) actions[el.dataset.act]?.(el.dataset, el);
+});
+
+document.addEventListener('input', (e) => {
+  const t = e.target;
+  if (t.dataset.filter === 'pos') { state.posQuery = t.value; $('#pos-list').innerHTML = posList(); }
+  if (t.dataset.filter === 'articles') { state.articleQuery = t.value; $('#articles-list').innerHTML = articlesTable(); }
+  if (t.dataset.count) {
+    state.counts[t.dataset.count] = t.value;
+    $(`#gap-${CSS.escape(t.dataset.count)}`).textContent = gapText(t.dataset.count, Number(t.dataset.theory));
+  }
+  if (t.id === 'discount') {
+    state.discount = Number(t.value) || 0;
+    $('#cart-total').textContent = ar(saleTotals([...state.cart.values()], state.discount).total);
+  }
+});
+
+document.addEventListener('change', async (e) => {
+  const t = e.target;
+  if (t.dataset.change === 'setDepot' || t.dataset.change === 'setDepotInv') {
+    await store.setMeta({ depotId: t.value });
+    if (t.dataset.change === 'setDepotInv') state.counts = {};
+    render();
+  }
+  if (t.dataset.cart) {
+    const line = state.cart.get(t.dataset.cart);
+    const qty = Number(t.value);
+    if (line && qty > 0) line.qty = qty; else state.cart.delete(t.dataset.cart);
+    $('#cart').innerHTML = cartView();
+  }
+  if (t.id === 'payment') state.payment = t.value;
+  if (t.id === 'partner') state.partnerId = t.value;
+});
+
+document.addEventListener('keydown', (e) => {
+  // Une douchette envoie le code puis Entrée : correspondance exacte directe.
+  if (e.key !== 'Enter' || e.target.id !== 'pos-search') return;
+  const code = e.target.value.trim().toLowerCase();
+  const exact = articles().find((a) => (a.code || '').toLowerCase() === code);
+  const list = exact ? [exact] : articles().filter((a) => a.name.toLowerCase().includes(code));
+  if (code && list.length === 1) {
+    addToCart(list[0]);
+    state.posQuery = '';
+    e.target.value = '';
+    $('#pos-list').innerHTML = posList();
+  }
+});
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'sync-form') return;
+  e.preventDefault();
+  const f = e.target.elements;
+  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: f.serverUrl.value.trim(), token: f.token.value.trim() });
+  await syncNow();
+});
+
+document.addEventListener('focusout', () => setTimeout(() => { if (renderPending) safeRender(); }, 0));
+$('#dlg').addEventListener('close', () => { if (renderPending) safeRender(); });
+addEventListener('hashchange', render);
+addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.installEvent = e; if (route() === 'settings') safeRender(); });
+
+// --- Démarrage
+await store.init();
+store.subscribe(safeRender);
+onSyncState(renderChip);
+render();
+startSync();
+// Demande au navigateur de ne pas purger les données locales.
+navigator.storage?.persist?.();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
