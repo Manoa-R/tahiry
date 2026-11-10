@@ -1,6 +1,8 @@
 // Interface Tahiry : vues rendues depuis la base locale, jamais depuis le réseau.
 import { store } from './store.js';
-import { syncNow, startSync, syncState, onSyncState } from './sync.js';
+import {
+  syncNow, startSync, syncState, onSyncState, registerDevice, loginOnline, verifyShopKey, useAdminKey, hasSession,
+} from './sync.js';
 import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
   buildTransfer, buildInventory, averageCosts, costOf, buildPurchase, salesReport,
@@ -246,7 +248,8 @@ const views = {
       <section class="card"><h2>Synchronisation</h2><form id="sync-form">
         <label class="field"><span>Nom du vendeur sur cet appareil</span><input name="seller" value="${m.seller ?? ''}" autocomplete="off"></label>
         <label class="field"><span>Adresse du serveur (vide = ce site)</span><input name="serverUrl" type="url" value="${m.serverUrl ?? ''}" placeholder="${location.origin}" autocomplete="off"></label>
-        <label class="field"><span>Clé de synchronisation</span><input name="token" type="password" value="${m.token ?? ''}" autocomplete="off"></label>
+        <label class="field"><span>${m.deviceToken ? 'Clé boutique (pour réenregistrer l’appareil)' : 'Clé boutique'}</span><input name="token" type="password" autocomplete="off" placeholder="${m.deviceToken || m.token ? 'Enregistrée — laisser vide pour conserver' : 'Clé affichée par le serveur'}"></label>
+        <p class="muted small">${m.deviceToken ? 'Appareil enregistré : la clé boutique n’est pas conservée.' : m.token ? 'Clé boutique conservée (aucun utilisateur pour l’instant).' : 'Appareil non relié à un serveur.'}</p>
         <div class="row"><button class="btn primary" type="submit">Enregistrer et synchroniser</button></div></form>
         <p class="muted small">En attente d’envoi : <span id="pending-count">${store.outboxCount}</span> · Appareil ${m.deviceId}</p></section>
       <section class="card"><h2>Utilisateurs</h2>
@@ -373,11 +376,14 @@ async function submitPin(form) {
   if (wait > 0) return lockError(form, `Trop d’essais. Réessayez dans ${wait} s.`);
   const user = store.get('users', lock.userId);
   try {
-    if (await checkPin(user, form.elements.pin.value)) {
+    const pin = form.elements.pin.value;
+    if (await checkPin(user, pin)) {
       Object.assign(lock, { userId: null, failures: 0, blockedUntil: 0 });
       currentUserId = user.id;
       session.set(user.id);
       render();
+      // En ligne : ouvre la session serveur qui autorise l'envoi de ses modifications.
+      loginOnline(user.id, pin);
       return undefined;
     }
   } catch (err) {
@@ -393,6 +399,7 @@ async function submitPin(form) {
 function lockNow() {
   currentUserId = null;
   recovery = false;
+  useAdminKey(null);
   session.set(null);
   if ($('#dlg').open) $('#dlg').close();
   Object.assign(state, { cart: new Map(), discount: 0 });
@@ -429,7 +436,13 @@ function userForm(u = null) {
       assertKeepsManager(store.list('users'), id, next);
       if (v.pin) Object.assign(next, await makeCredentials(v.pin));
       await store.save('users', id, next);
-      if (first) { currentUserId = id; session.set(id); }
+      if (first) {
+        currentUserId = id;
+        session.set(id);
+        // Envoie le gérant au serveur (clé boutique), puis ouvre sa session.
+        await syncNow();
+        await loginOnline(id, v.pin);
+      }
     },
   });
 }
@@ -461,8 +474,17 @@ function renderChip() {
     offline: ['warn', 'Hors ligne'], unconfigured: ['', 'Local uniquement'], error: ['err', syncState.message],
   };
   const [cls, text] = labels[syncState.status];
-  $('#sync-chip').innerHTML = html`<span class="dot ${cls}"></span>${text}${pending}`;
-  $('#sync-chip').title = syncState.lastSync ? `Dernière synchro : ${syncState.lastSync.toLocaleTimeString('fr-FR')}` : 'Synchroniser maintenant';
+  const user = currentUser();
+  const needsLogin = syncState.held > 0 && user?.id && !hasSession(user.id);
+  $('#sync-chip').innerHTML = html`<span class="dot ${needsLogin ? 'warn' : cls}"></span>${needsLogin ? 'Reconnexion requise' : text}${pending}`;
+  $('#sync-chip').title = needsLogin
+    ? 'Vos modifications attendent une connexion en ligne : touchez pour saisir votre PIN'
+    : syncState.lastSync ? `Dernière synchro : ${syncState.lastSync.toLocaleTimeString('fr-FR')}` : 'Synchroniser maintenant';
+  if (syncState.rejected.length) {
+    const reasons = [...new Set(syncState.rejected.map((r) => r.reason))].join(', ');
+    alert(`${syncState.rejected.length} modification(s) refusée(s) par le serveur et annulée(s) sur cet appareil : ${reasons}.`);
+    syncState.rejected = [];
+  }
   const count = $('#pending-count');
   if (count) count.textContent = n;
 }
@@ -649,7 +671,12 @@ function addToCart(a) {
 }
 
 const actions = {
-  sync: () => syncNow(),
+  // Modifications en attente d'une session : on redemande le PIN pour l'ouvrir.
+  sync: () => {
+    const user = currentUser();
+    if (syncState.held > 0 && user?.id && !hasSession(user.id) && navigator.onLine) { lockNow(); lock.userId = user.id; renderLock(); return; }
+    syncNow();
+  },
   lock: lockNow,
   pickUser: ({ id }) => { lock.userId = id; renderLock(); },
   lockBack: () => { Object.assign(lock, { userId: null, forgot: false }); renderLock(); },
@@ -730,7 +757,7 @@ const actions = {
     // Le coût est figé à la vente : les marges restent justes si le coût moyen évolue.
     const cmp = costs();
     lines.forEach((l) => { l.cost = costOf(cmp, store.get('articles', l.articleId) ?? { id: l.articleId }); });
-    const { sale, movements } = buildSale({ id, number: saleNumber(), lines, discount: state.discount, payment: state.payment, depotId, partnerId: state.partnerId, by: seller(), at: Date.now() });
+    const { sale, movements } = buildSale({ id, number: saleNumber(), lines, discount: state.discount, payment: state.payment, depotId, partnerId: state.partnerId, by: seller(), userId: currentUser()?.id ?? null, at: Date.now() });
     await store.write([{ c: 'sales', id, data: sale }, ...movements.map((m) => ({ c: 'movements', ...m }))]);
     Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', posQuery: '' });
     render();
@@ -829,14 +856,19 @@ document.addEventListener('submit', async (e) => {
   if (e.target.id === 'recovery-form') {
     e.preventDefault();
     const key = e.target.elements.key.value.trim();
-    // Seule la clé déjà enregistrée sur cet appareil ouvre la récupération.
-    if (store.meta.token && key === store.meta.token) {
+    if (!store.meta.keyHash && !store.meta.token) {
+      lockError(e.target, 'Cet appareil n’a jamais été relié à la boutique');
+      return;
+    }
+    // Vérifiée localement (empreinte) ; la clé reste en mémoire pour synchroniser en gérant.
+    if (await verifyShopKey(key)) {
       recovery = true;
+      useAdminKey(key);
       lock.forgot = false;
       location.hash = 'settings';
       render();
     } else {
-      lockError(e.target, store.meta.token ? 'Clé incorrecte' : 'Aucune clé de synchronisation n’est enregistrée sur cet appareil');
+      lockError(e.target, 'Clé incorrecte');
     }
     return;
   }
@@ -861,8 +893,18 @@ document.addEventListener('submit', async (e) => {
   if (e.target.id !== 'sync-form') return;
   e.preventDefault();
   const f = e.target.elements;
-  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: f.serverUrl.value.trim(), token: f.token.value.trim() });
+  const key = f.token.value.trim();
+  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: f.serverUrl.value.trim() });
+  if (key) {
+    try {
+      // Avec des utilisateurs, la clé ne fait qu'enregistrer l'appareil ; sinon elle est gardée.
+      if (usersEnabled()) await registerDevice(key); else await store.setMeta({ token: key });
+    } catch (err) {
+      alert(`Enregistrement impossible : ${err.message}`);
+    }
+  }
   await syncNow();
+  render();
 });
 
 document.addEventListener('focusout', () => setTimeout(() => { if (renderPending) safeRender(); }, 0));
@@ -872,6 +914,7 @@ addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); state.insta
 
 // --- Démarrage
 await store.init();
+store.author = () => currentUser()?.id ?? null;
 store.subscribe(safeRender);
 onSyncState(renderChip);
 render();

@@ -55,10 +55,10 @@ export function saleTotals(lines, discount = 0) {
 }
 
 // Une vente crée atomiquement le document de vente et ses sorties de stock.
-export function buildSale({ id, number, lines, discount, payment, depotId, partnerId, by, at }) {
+export function buildSale({ id, number, lines, discount, payment, depotId, partnerId, by, at, userId = null }) {
   if (!lines.length) throw new Error('Le panier est vide');
   const totals = saleTotals(lines, discount);
-  const sale = { number, lines, payment, depotId, partnerId: partnerId || null, by, at, cancelled: false, ...totals };
+  const sale = { number, lines, payment, depotId, partnerId: partnerId || null, by, userId, at, cancelled: false, ...totals };
   const movements = lines.map((l, i) => ({
     id: `${id}:v:${i}`,
     data: { articleId: l.articleId, depotId, qty: -l.qty, type: 'vente', ref: number, by, at },

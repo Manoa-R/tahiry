@@ -1,63 +1,136 @@
 // Moteur de synchronisation : envoie la file locale, récupère les nouveautés.
+//
+// Identifiants :
+// - clé boutique (meta.token) : tous droits ; gardée seulement tant qu'aucun utilisateur n'existe ;
+// - jeton d'appareil (meta.deviceToken) : remplace la clé dès qu'il y a des utilisateurs ;
+// - sessions (meta.sessions) : une par utilisateur, obtenue en saisissant son PIN en ligne.
 import { store } from './store.js';
+import { hashPin, newId } from './domain.js';
 
 const BATCH = 200;
 const INTERVAL = 30_000;
 const TIMEOUT = 20_000;
 
-export const syncState = { status: 'idle', message: '', lastSync: null };
+export const syncState = { status: 'idle', message: '', lastSync: null, held: 0, rejected: [] };
 
 let running = null;
 let debounce = null;
+let adminKey = null; // clé boutique saisie pour une récupération : en mémoire seulement
 const listeners = new Set();
 export const onSyncState = (fn) => listeners.add(fn);
+const notify = () => listeners.forEach((fn) => fn());
 
 function setState(status, message = '') {
   Object.assign(syncState, { status, message });
-  listeners.forEach((fn) => fn());
+  notify();
 }
 
 const serverUrl = () => (store.meta.serverUrl || location.origin).replace(/\/$/, '');
+const credential = () => adminKey || store.meta.deviceToken || store.meta.token;
+const isAdmin = () => Boolean(adminKey || (!store.meta.deviceToken && store.meta.token));
+const hasUsers = () => store.list('users').some((u) => u.active !== false);
 
-async function exchange(changes) {
+async function post(path, body, bearer = credential()) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
   try {
-    const res = await fetch(`${serverUrl()}/api/sync`, {
+    const res = await fetch(`${serverUrl()}${path}`, {
       method: 'POST',
       signal: ctrl.signal,
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${store.meta.token}` },
-      body: JSON.stringify({
-        deviceId: store.meta.deviceId,
-        cursor: store.meta.cursor ?? 0,
-        changes: changes.map(({ c, id, data, hlc, deleted }) => ({ c, id, data, hlc, deleted })),
-      }),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
+      body: JSON.stringify(body),
     });
-    if (res.status === 401) throw Object.assign(new Error('Clé de synchronisation refusée'), { auth: true });
-    if (!res.ok) throw new Error(`Erreur serveur (${res.status})`);
-    return await res.json();
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(json.error || `Erreur serveur (${res.status})`), { status: res.status });
+    return json;
   } finally {
     clearTimeout(timer);
   }
 }
 
+// Empreinte locale de la clé : permet la récupération « PIN oublié » sans garder la clé.
+async function rememberKeyHash(key) {
+  const keySalt = newId();
+  return { keySalt, keyHash: await hashPin(key, keySalt) };
+}
+
+export async function verifyShopKey(key) {
+  if (store.meta.keyHash) return (await hashPin(key, store.meta.keySalt)) === store.meta.keyHash;
+  return Boolean(store.meta.token) && key === store.meta.token;
+}
+
+// Échange la clé boutique contre un jeton d'appareil, puis oublie la clé.
+export async function registerDevice(key) {
+  const { deviceToken } = await post('/api/devices', {}, key);
+  await store.setMeta({ deviceToken, token: null, sessions: {}, ...(await rememberKeyHash(key)) });
+}
+
+export function useAdminKey(key) { adminKey = key; }
+
+// Ouvre une session serveur pour l'utilisateur ; sans réseau, on réessaiera au prochain PIN.
+export async function loginOnline(userId, pin) {
+  if (!credential() || !navigator.onLine) return false;
+  try {
+    const { sessionToken } = await post('/api/login', { userId, pin });
+    await store.setMeta({ sessions: { ...(store.meta.sessions ?? {}), [userId]: sessionToken } });
+    notify();
+    syncNow();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export const hasSession = (userId) => Boolean(store.meta.sessions?.[userId]);
+
+async function exchange(changes) {
+  return post('/api/sync', {
+    deviceId: store.meta.deviceId,
+    cursor: store.meta.cursor ?? 0,
+    sessions: store.meta.sessions ?? {},
+    changes: changes.map(({ c, id, data, hlc, deleted, author }) => ({ c, id, data, hlc, deleted, author })),
+  });
+}
+
+async function dropSessions(authors) {
+  if (!authors.size) return;
+  const sessions = { ...(store.meta.sessions ?? {}) };
+  authors.forEach((a) => delete sessions[a]);
+  await store.setMeta({ sessions });
+}
+
 async function run() {
-  if (!store.meta.token) return setState('unconfigured');
+  if (!credential()) return setState('unconfigured');
   if (!navigator.onLine) return setState('offline');
   setState('syncing');
   try {
+    const all = await store.pending();
+    const admin = isAdmin();
+    const sessions = store.meta.sessions ?? {};
+    // Un changement signé par un utilisateur sans session attend sa prochaine connexion.
+    const sendable = admin ? all : all.filter((r) => !r.author || sessions[r.author]);
+    syncState.held = all.length - sendable.length;
+    const rejected = [];
     let more = true;
-    while (more) {
-      const batch = await store.pendingBatch(BATCH);
+    for (let i = 0; i < sendable.length || more; i += BATCH) {
+      const batch = sendable.slice(i, i + BATCH);
       const reply = await exchange(batch);
-      await store.acknowledge(batch);
+      const deferred = new Set((reply.deferred ?? []).map((d) => `${d.c}/${d.id}`));
+      await store.acknowledge(batch.filter((r) => !deferred.has(r.key)));
+      await store.applyRejected(reply.rejected ?? []);
+      await dropSessions(new Set((reply.deferred ?? []).map((d) => d.author)));
+      syncState.held += deferred.size;
+      rejected.push(...(reply.rejected ?? []));
       await store.applyRemote(reply.changes, reply.cursor);
-      more = reply.hasMore || batch.length === BATCH;
+      more = reply.hasMore;
     }
+    if (rejected.length) syncState.rejected = rejected;
+    // Dès qu'il existe des utilisateurs, cet appareil remplace la clé boutique par son propre jeton.
+    if (hasUsers() && store.meta.token && !store.meta.deviceToken && !adminKey) await registerDevice(store.meta.token);
     syncState.lastSync = new Date();
     setState('ok');
   } catch (err) {
-    if (err.auth) setState('error', err.message);
+    if (err.status === 401 || err.status === 403) setState('error', err.message);
     else setState('offline', 'Serveur injoignable');
   }
 }
@@ -72,7 +145,7 @@ export function startSync() {
     if (!local) return;
     clearTimeout(debounce);
     debounce = setTimeout(syncNow, 800);
-    listeners.forEach((fn) => fn());
+    notify();
   });
   addEventListener('online', syncNow);
   addEventListener('offline', () => setState('offline'));

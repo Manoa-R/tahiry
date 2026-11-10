@@ -30,6 +30,7 @@ class Store {
   data = Object.fromEntries(COLLECTIONS.map((c) => [c, new Map()]));
   meta = {};
   outboxCount = 0;
+  author = null; // fonction fournie par l'interface : () => identifiant de l'utilisateur connecté
 
   async init() {
     this.db = await openDb();
@@ -73,8 +74,10 @@ class Store {
 
   // Écrit plusieurs enregistrements en une transaction (vente + sorties de stock).
   async write(changes) {
+    // L'auteur (utilisateur connecté) permet au serveur de vérifier ses droits.
+    const author = this.author?.() ?? null;
     const records = changes.map(({ c, id, data, deleted = false }) => ({
-      key: `${c}/${id}`, c, id, data, deleted, hlc: this.clock.tick(),
+      key: `${c}/${id}`, c, id, data, deleted, author, hlc: this.clock.tick(),
     }));
     const tx = this.db.transaction(['records', 'outbox', 'meta'], 'readwrite');
     const outbox = tx.objectStore('outbox');
@@ -93,9 +96,34 @@ class Store {
     return r ? this.write([{ c, id, data: r.data, deleted: true }]) : undefined;
   }
 
-  async pendingBatch(limit) {
-    const tx = this.db.transaction('outbox');
-    return result(tx.objectStore('outbox').getAll(undefined, limit));
+  async pending() {
+    return result(this.db.transaction('outbox').objectStore('outbox').getAll());
+  }
+
+  // Changements refusés par le serveur : on reprend sa version (ou on efface si
+  // l'enregistrement n'existe pas côté serveur) et on retire la file d'envoi.
+  async applyRejected(rejected) {
+    if (!rejected.length) return;
+    const tx = this.db.transaction(['records', 'outbox'], 'readwrite');
+    const restored = [];
+    for (const r of rejected) {
+      const key = `${r.c}/${r.id}`;
+      tx.objectStore('outbox').delete(key);
+      if (r.current) {
+        const rec = { key, c: r.c, id: r.id, ...r.current };
+        tx.objectStore('records').put(rec);
+        restored.push(rec);
+      } else {
+        tx.objectStore('records').delete(key);
+        restored.push({ key, c: r.c, id: r.id, removed: true });
+      }
+    }
+    await done(tx);
+    for (const r of restored) {
+      if (r.removed) this.data[r.c]?.delete(r.id); else this.#remember(r);
+    }
+    this.outboxCount = await result(this.db.transaction('outbox').objectStore('outbox').count());
+    this.emit({ remote: true });
   }
 
   // Retire les éléments envoyés, sauf ceux modifiés entre-temps.
