@@ -6,7 +6,7 @@ import { resolve, extname, sep } from 'node:path';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-export const COLLECTIONS = new Set(['articles', 'depots', 'partners', 'movements', 'sales']);
+export const COLLECTIONS = new Set(['articles', 'depots', 'partners', 'movements', 'sales', 'purchases', 'users']);
 // Un mouvement de stock n'est jamais modifié : on le compense par un autre mouvement.
 const IMMUTABLE = new Set(['movements']);
 const MAX_BODY = 5 * 1024 * 1024;

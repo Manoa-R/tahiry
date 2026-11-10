@@ -3,7 +3,7 @@
 import { createClock, newId } from './domain.js';
 
 const DB_NAME = 'tahiry';
-export const COLLECTIONS = ['articles', 'depots', 'partners', 'movements', 'sales'];
+export const COLLECTIONS = ['articles', 'depots', 'partners', 'movements', 'sales', 'purchases', 'users'];
 
 const done = (tx) => new Promise((ok, fail) => {
   tx.oncomplete = () => ok();
@@ -48,7 +48,8 @@ class Store {
     if (!this.list('depots').length) await this.save('depots', 'depot-principal', { name: 'Dépôt principal' });
   }
 
-  #remember(r) { this.data[r.c].set(r.id, r); }
+  // Une collection inconnue (venue d'une version plus récente) est gardée sans planter.
+  #remember(r) { (this.data[r.c] ??= new Map()).set(r.id, r); }
 
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   emit(detail) { this.listeners.forEach((fn) => fn(detail)); }

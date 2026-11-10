@@ -3,7 +3,7 @@ import { store } from './store.js';
 import { syncNow, startSync, syncState, onSyncState } from './sync.js';
 import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
-  buildTransfer, buildInventory,
+  buildTransfer, buildInventory, averageCosts, costOf, buildPurchase, salesReport,
 } from './domain.js';
 
 // --- Rendu : toute valeur interpolée est échappée, y compris les données synchronisées.
@@ -24,6 +24,7 @@ const ROUTES = {
   pos: ['Caisse', 'M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h3'],
   articles: ['Articles', 'M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8'],
   movements: ['Mouvements', 'M7 4v15M7 19l-4-4M7 19l4-4M17 20V5M17 5l-4 4M17 5l4 4'],
+  purchases: ['Achats', 'M3 4h2l2 11h11l2-8H6M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2M17 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2'],
   inventory: ['Inventaire', 'M9 4h6v3H9zM6 5h3M15 5h3v16H6V5M9 12l2 2 4-4'],
   sales: ['Ventes', 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6'],
   partners: ['Partenaires', 'M16 19c0-3-2-5-5-5s-5 2-5 5M11 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M17 11a3 3 0 0 0 0-6M21 19c0-2-1-4-3-4.500'],
@@ -38,6 +39,7 @@ const articles = () => store.list('articles').sort((a, b) => a.name.localeCompar
 const depots = () => store.list('depots').sort((a, b) => a.name.localeCompare(b.name, 'fr'));
 const partners = (kind) => store.list('partners').filter((p) => !kind || p.kind === kind).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
 const stock = () => computeStock(store.list('movements'));
+const costs = () => averageCosts(store.list('movements'));
 const seller = () => store.meta.seller || 'Appareil';
 const currentDepot = () => {
   const d = store.meta.depotId;
@@ -70,7 +72,7 @@ function openForm({ title, fields, values = {}, submit = 'Enregistrer', onSubmit
     const out = {};
     for (const f of fields) {
       const raw = e.target.elements[f.name].value.trim();
-      out[f.name] = f.type === 'number' ? (raw === '' ? 0 : Number(raw)) : raw;
+      out[f.name] = f.type === 'number' ? (raw === '' ? (f.optional ? null : 0) : Number(raw)) : raw;
     }
     try {
       await onSubmit(out);
@@ -90,7 +92,8 @@ const views = {
   dashboard() {
     const st = stock();
     const list = articles();
-    const value = list.reduce((s, a) => s + stockTotal(st, a.id) * (a.cost || 0), 0);
+    const cmp = costs();
+    const value = list.reduce((s, a) => s + Math.max(0, stockTotal(st, a.id)) * costOf(cmp, a), 0);
     const today = new Date().setHours(0, 0, 0, 0);
     const todaySales = store.list('sales').filter((s) => s.at >= today && !s.cancelled);
     const low = list.filter((a) => { const q = stockTotal(st, a.id); return q >= 0 && q <= (a.min || 0); });
@@ -144,6 +147,16 @@ const views = {
       ${rows.length ? html`<div class="table-wrap"><table><thead><tr><th>Date</th><th>Article</th><th>Dépôt</th><th>Type</th><th class="num">Quantité</th><th>Référence</th><th>Par</th></tr></thead><tbody>
       ${rows.map((m) => html`<tr><td class="small">${dt(m.at)}</td><td>${rawName('articles', m.articleId)}</td><td>${rawName('depots', m.depotId)}</td><td><span class="badge">${m.type}</span></td><td class="num">${m.qty > 0 ? '+' : ''}${num.format(m.qty)}</td><td class="small">${m.ref || m.note}</td><td class="small">${m.by}</td></tr>`)}
       </tbody></table></div>` : html`<div class="card empty">Aucun mouvement enregistré.</div>`}`;
+  },
+
+  purchases() {
+    const rows = store.list('purchases').sort((a, b) => b.at - a.at).slice(0, 200);
+    return html`<div class="toolbar"><button class="btn primary" data-act="purchaseNew" ${articles().length ? '' : new Safe('disabled')}>Nouvelle réception</button>
+      <span class="muted small">Chaque réception met à jour le stock et le coût moyen pondéré.</span></div>
+      ${rows.length ? html`<div class="table-wrap"><table><thead><tr><th>Date</th><th>N°</th><th>Fournisseur</th><th>Dépôt</th><th class="num">Lignes</th><th class="num">Total</th><th></th></tr></thead><tbody>
+      ${rows.map((p) => html`<tr><td class="small">${dt(p.at)}</td><td class="small">${p.number}</td><td>${p.partnerId ? rawName('partners', p.partnerId) : '—'}</td><td>${rawName('depots', p.depotId)}</td>
+        <td class="num">${p.lines.length}</td><td class="num">${ar(p.total)}</td><td class="actions"><button class="btn small" data-act="purchaseShow" data-id="${p.id}">Détail</button></td></tr>`)}
+      </tbody></table></div>` : html`<div class="card empty">Aucune réception enregistrée.</div>`}`;
   },
 
   inventory() {
@@ -324,12 +337,57 @@ const articleOptions = () => articles().map((a) => ({ value: a.id, label: a.name
 const depotOptions = () => depots().map((d) => ({ value: d.id, label: d.name }));
 const positive = (qty) => { if (!(qty > 0)) throw new Error('La quantité doit être supérieure à zéro'); };
 
-function saleNumber() {
+// Numéro unique hors ligne : préfixe, date, appareil, compteur local de l'appareil.
+function docNumber(prefix, collection) {
   const tag = store.meta.deviceId.slice(0, 4).toUpperCase();
   const d = new Date();
   const day = `${String(d.getFullYear()).slice(2)}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const n = store.list('sales').filter((s) => s.number.includes(`-${tag}-`)).length + 1;
-  return `V${day}-${tag}-${n}`;
+  const n = store.list(collection).filter((s) => s.number.includes(`-${tag}-`)).length + 1;
+  return `${prefix}${day}-${tag}-${n}`;
+}
+const saleNumber = () => docNumber('V', 'sales');
+
+// --- Réception fournisseur multi-lignes
+function purchaseForm() {
+  state.purchase = { partnerId: '', depotId: currentDepot(), note: '', lines: [{ articleId: '', qty: '', cost: '' }] };
+  renderPurchaseForm();
+  $('#dlg').showModal();
+}
+
+function purchaseTotal() {
+  return Math.round(state.purchase.lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.cost) || 0), 0));
+}
+
+function renderPurchaseForm() {
+  const p = state.purchase;
+  const list = articles();
+  $('#dlg').innerHTML = html`<form id="purchase-form" class="wide"><h2>Réception fournisseur</h2>
+    <label class="field"><span>Fournisseur</span><select data-pf="partnerId"><option value="">—</option>${options(partners('fournisseur'), p.partnerId)}</select></label>
+    <label class="field"><span>Dépôt de réception</span><select data-pf="depotId">${options(depots(), p.depotId)}</select></label>
+    <div class="table-wrap"><table><thead><tr><th>Article</th><th style="width:90px">Qté</th><th style="width:110px">Coût unit.</th><th></th></tr></thead><tbody>
+    ${p.lines.map((l, i) => html`<tr>
+      <td><select aria-label="Article ligne ${i + 1}" data-pl="${i}:articleId"><option value="">Choisir…</option>${options(list, l.articleId)}</select></td>
+      <td><input aria-label="Quantité ligne ${i + 1}" type="number" step="any" min="0" inputmode="decimal" data-pl="${i}:qty" value="${l.qty}"></td>
+      <td><input aria-label="Coût ligne ${i + 1}" type="number" step="any" min="0" inputmode="decimal" data-pl="${i}:cost" value="${l.cost}"></td>
+      <td><button class="btn small" type="button" data-act="purchaseRemoveLine" data-i="${i}" aria-label="Retirer la ligne ${i + 1}">×</button></td></tr>`)}
+    </tbody></table></div>
+    <div class="row" style="justify-content:space-between"><button class="btn" type="button" data-act="purchaseAddLine">Ajouter une ligne</button>
+      <strong>Total : <span id="purchase-total">${ar(purchaseTotal())}</span></strong></div>
+    <label class="field"><span>Référence (bon de livraison, facture…)</span><input data-pf="note" value="${p.note}" autocomplete="off"></label>
+    <p class="error" hidden></p>
+    <div class="row"><button class="btn" type="button" data-act="closeDlg">Annuler</button><button class="btn primary" type="submit">Réceptionner</button></div></form>`;
+}
+
+function showPurchase(p) {
+  $('#dlg').innerHTML = html`<h2>Réception ${p.number}</h2>
+    <p class="muted small">${dt(p.at)} · ${p.partnerId ? rawName('partners', p.partnerId) : 'Sans fournisseur'} · ${rawName('depots', p.depotId)} · ${p.by}</p>
+    <div class="table-wrap"><table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Coût</th><th class="num">Montant</th></tr></thead><tbody>
+    ${p.lines.map((l) => html`<tr><td>${rawName('articles', l.articleId)}</td><td class="num">${num.format(l.qty)}</td><td class="num">${ar(l.cost)}</td><td class="num">${ar(l.qty * l.cost)}</td></tr>`)}
+    </tbody></table></div>
+    <div class="totals grand"><span>Total</span><span class="num">${ar(p.total)}</span></div>
+    ${p.note ? html`<p class="muted small">Réf. : ${p.note}</p>` : ''}
+    <div class="row"><button class="btn" data-act="closeDlg">Fermer</button></div>`;
+  $('#dlg').showModal();
 }
 
 function showTicket(sale) {
@@ -360,7 +418,7 @@ async function loadDemo() {
     { c: 'partners', id: 'demo-c1', data: { name: 'Épicerie Soa', kind: 'client', phone: '034 00 000 01' } },
     { c: 'partners', id: 'demo-f1', data: { name: 'Grossiste Mahajanga', kind: 'fournisseur', phone: '032 00 000 02' } },
     ...items.map(([id, name, category, code, unit, cost, price, min]) => ({ c: 'articles', id: `demo-${id}`, data: { name, category, code, unit, cost, price, min } })),
-    ...items.map(([id, , , , , , , , qty]) => ({ c: 'movements', id: `demo-init-${id}`, data: { articleId: `demo-${id}`, depotId: 'depot-principal', qty, type: 'entree', ref: 'Stock initial', note: '', by: 'Démo', at: now } })),
+    ...items.map(([id, , , , , cost, , , qty]) => ({ c: 'movements', id: `demo-init-${id}`, data: { articleId: `demo-${id}`, depotId: 'depot-principal', qty, cost, type: 'entree', ref: 'Stock initial', note: '', by: 'Démo', at: now } })),
   ]);
   render();
   syncNow();
@@ -407,12 +465,19 @@ const actions = {
       { name: 'articleId', label: 'Article', type: 'select', options: articleOptions(), required: true },
       { name: 'depotId', label: 'Dépôt', type: 'select', options: depotOptions(), required: true },
       { name: 'qty', label: 'Quantité', type: 'number', required: true },
-      ...(kind === 'entree' ? [{ name: 'partnerId', label: 'Fournisseur', type: 'select', options: [{ value: '', label: '—' }, ...partners('fournisseur').map((p) => ({ value: p.id, label: p.name }))] }] : []),
+      ...(kind === 'entree' ? [
+        { name: 'cost', label: 'Coût unitaire (Ar, facultatif)', type: 'number', optional: true },
+        { name: 'partnerId', label: 'Fournisseur', type: 'select', options: [{ value: '', label: '—' }, ...partners('fournisseur').map((p) => ({ value: p.id, label: p.name }))] },
+      ] : []),
       { name: 'note', label: 'Motif ou référence' },
     ],
     onSubmit: (v) => {
       positive(v.qty);
-      return store.save('movements', newId(), { ...v, qty: kind === 'entree' ? v.qty : -v.qty, type: kind, ref: v.partnerId ? rawName('partners', v.partnerId) : '', by: seller(), at: Date.now() });
+      const { cost, ...rest } = v;
+      return store.save('movements', newId(), {
+        ...rest, ...(kind === 'entree' && cost !== null ? { cost } : {}),
+        qty: kind === 'entree' ? v.qty : -v.qty, type: kind, ref: v.partnerId ? rawName('partners', v.partnerId) : '', by: seller(), at: Date.now(),
+      });
     },
   }),
   transferNew: () => openForm({
@@ -449,6 +514,9 @@ const actions = {
     const short = lines.filter((l) => l.qty > stockAt(st, l.articleId, depotId));
     if (short.length && !confirm(`Stock insuffisant pour : ${short.map((l) => l.name).join(', ')}.\nVendre quand même ?`)) return;
     const id = newId();
+    // Le coût est figé à la vente : les marges restent justes si le coût moyen évolue.
+    const cmp = costs();
+    lines.forEach((l) => { l.cost = costOf(cmp, store.get('articles', l.articleId) ?? { id: l.articleId }); });
     const { sale, movements } = buildSale({ id, number: saleNumber(), lines, discount: state.discount, payment: state.payment, depotId, partnerId: state.partnerId, by: seller(), at: Date.now() });
     await store.write([{ c: 'sales', id, data: sale }, ...movements.map((m) => ({ c: 'movements', ...m }))]);
     Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', posQuery: '' });
@@ -456,6 +524,14 @@ const actions = {
     showTicket(sale);
   },
   ticket: ({ id }) => showTicket(store.get('sales', id)),
+  purchaseNew: purchaseForm,
+  purchaseShow: ({ id }) => showPurchase(store.get('purchases', id)),
+  purchaseAddLine: () => { state.purchase.lines.push({ articleId: '', qty: '', cost: '' }); renderPurchaseForm(); },
+  purchaseRemoveLine: ({ i }) => {
+    state.purchase.lines.splice(Number(i), 1);
+    if (!state.purchase.lines.length) state.purchase.lines.push({ articleId: '', qty: '', cost: '' });
+    renderPurchaseForm();
+  },
   saleCancel: async ({ id }) => {
     const { id: _ignored, ...sale } = store.get('sales', id);
     if (!confirm(`Annuler la vente ${sale.number} ? Le stock sera recrédité.`)) return;
@@ -480,6 +556,18 @@ document.addEventListener('input', (e) => {
   if (t.dataset.count) {
     state.counts[t.dataset.count] = t.value;
     $(`#gap-${CSS.escape(t.dataset.count)}`).textContent = gapText(t.dataset.count, Number(t.dataset.theory));
+  }
+  if (t.dataset.pf) state.purchase[t.dataset.pf] = t.value;
+  if (t.dataset.pl) {
+    const [i, field] = t.dataset.pl.split(':');
+    const line = state.purchase.lines[Number(i)];
+    line[field] = t.value;
+    // Article choisi : coût proposé = coût moyen actuel, modifiable.
+    if (field === 'articleId' && line.cost === '' && t.value) {
+      line.cost = String(costOf(costs(), store.get('articles', t.value)));
+      t.closest('tr').querySelector('[data-pl$=":cost"]').value = line.cost;
+    }
+    $('#purchase-total').textContent = ar(purchaseTotal());
   }
   if (t.id === 'discount') {
     state.discount = Number(t.value) || 0;
@@ -519,6 +607,24 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'purchase-form') {
+    e.preventDefault();
+    const p = state.purchase;
+    try {
+      const id = newId();
+      const lines = p.lines.map((l) => ({ articleId: l.articleId, qty: Number(l.qty) || 0, cost: l.cost === '' ? NaN : Number(l.cost) }))
+        .filter((l) => l.articleId || l.qty);
+      const { purchase, movements } = buildPurchase({ id, number: docNumber('A', 'purchases'), partnerId: p.partnerId, depotId: p.depotId, lines, note: p.note.trim(), by: seller(), at: Date.now() });
+      await store.write([{ c: 'purchases', id, data: purchase }, ...movements.map((m) => ({ c: 'movements', ...m }))]);
+      $('#dlg').close();
+      render();
+    } catch (err) {
+      const box = e.target.querySelector('.error');
+      box.textContent = err.message;
+      box.hidden = false;
+    }
+    return;
+  }
   if (e.target.id !== 'sync-form') return;
   e.preventDefault();
   const f = e.target.elements;

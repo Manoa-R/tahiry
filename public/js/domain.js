@@ -84,6 +84,77 @@ export function buildTransfer({ id, articleId, fromDepot, toDepot, qty, by, at, 
   ];
 }
 
+// Coût moyen pondéré (CUMP) calculé depuis les entrées valorisées : il se déduit des
+// mouvements, donc deux appareils qui réceptionnent hors ligne obtiennent le même résultat.
+export function averageCosts(movements) {
+  const acc = new Map();
+  for (const m of movements) {
+    if (m.qty <= 0 || typeof m.cost !== 'number' || m.cost < 0) continue;
+    const a = acc.get(m.articleId) ?? { qty: 0, value: 0 };
+    a.qty += m.qty;
+    a.value += m.qty * m.cost;
+    acc.set(m.articleId, a);
+  }
+  const out = new Map();
+  for (const [id, a] of acc) if (a.qty > 0) out.set(id, Math.round(a.value / a.qty));
+  return out;
+}
+
+export const costOf = (costs, article) => costs.get(article.id) ?? (article.cost || 0);
+
+export function buildPurchase({ id, number, partnerId, depotId, lines, note = '', by, at }) {
+  const valid = lines.filter((l) => l.articleId && l.qty > 0);
+  if (!valid.length) throw new Error('Ajoutez au moins une ligne avec une quantité');
+  if (valid.some((l) => !(l.cost >= 0))) throw new Error('Le coût unitaire doit être positif ou nul');
+  const total = Math.round(valid.reduce((s, l) => s + l.qty * l.cost, 0));
+  const purchase = { number, partnerId: partnerId || null, depotId, lines: valid, total, note, by, at };
+  const movements = valid.map((l, i) => ({
+    id: `${id}:r:${i}`,
+    data: { articleId: l.articleId, depotId, qty: l.qty, cost: l.cost, type: 'achat', ref: number, partnerId: partnerId || null, by, at },
+  }));
+  return { purchase, movements };
+}
+
+// Rapport de ventes sur une période [from, to[ : marge calculée avec le coût figé à la vente.
+export function salesReport(sales, { from = -Infinity, to = Infinity } = {}) {
+  const kept = sales.filter((s) => !s.cancelled && s.at >= from && s.at < to);
+  const byPayment = new Map();
+  const bySeller = new Map();
+  const byArticle = new Map();
+  let revenue = 0, cost = 0, discount = 0;
+  for (const s of kept) {
+    revenue += s.total;
+    discount += s.discount || 0;
+    byPayment.set(s.payment, (byPayment.get(s.payment) ?? 0) + s.total);
+    bySeller.set(s.by, (bySeller.get(s.by) ?? 0) + s.total);
+    // La remise est répartie au prorata pour que la somme par article égale le CA.
+    const ratio = s.subtotal ? s.total / s.subtotal : 0;
+    for (const l of s.lines) {
+      const lineCost = (l.cost || 0) * l.qty;
+      cost += lineCost;
+      const a = byArticle.get(l.articleId) ?? { articleId: l.articleId, name: l.name, qty: 0, revenue: 0, margin: 0 };
+      const lineRevenue = l.price * l.qty * ratio;
+      a.qty = round3(a.qty + l.qty);
+      a.revenue += lineRevenue;
+      a.margin += lineRevenue - lineCost;
+      byArticle.set(l.articleId, a);
+    }
+  }
+  const sortDesc = (m) => [...m].sort((a, b) => b[1] - a[1]);
+  return {
+    count: kept.length,
+    revenue,
+    discount,
+    cost: Math.round(cost),
+    margin: Math.round(revenue - cost),
+    average: kept.length ? Math.round(revenue / kept.length) : 0,
+    byPayment: sortDesc(byPayment),
+    bySeller: sortDesc(bySeller),
+    articles: [...byArticle.values()].map((a) => ({ ...a, revenue: Math.round(a.revenue), margin: Math.round(a.margin) }))
+      .sort((a, b) => b.revenue - a.revenue),
+  };
+}
+
 // Inventaire : enregistre seulement l'écart entre compté et théorique.
 export function buildInventory({ id, depotId, counts, stock, by, at }) {
   const movements = [];

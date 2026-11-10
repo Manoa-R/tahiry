@@ -69,3 +69,41 @@ test('l’inventaire ne crée un mouvement que pour les écarts', () => {
   assert.equal(moves.length, 1);
   assert.equal(moves[0].data.qty, -2);
 });
+
+import { averageCosts, costOf, buildPurchase, salesReport } from '../public/js/domain.js';
+
+test('le coût moyen pondéré ignore sorties et entrées non valorisées', () => {
+  const costs = averageCosts([
+    { articleId: 'x', qty: 10, cost: 1000 },
+    { articleId: 'x', qty: 30, cost: 2000 },
+    { articleId: 'x', qty: -5 },
+    { articleId: 'x', qty: 7 },
+  ]);
+  assert.equal(costs.get('x'), 1750);
+  assert.equal(costOf(costs, { id: 'y', cost: 300 }), 300);
+});
+
+test('une réception crée des entrées valorisées et rejette les lignes vides', () => {
+  const { purchase, movements } = buildPurchase({
+    id: 'p', number: 'A1', depotId: 'd', partnerId: 'f',
+    lines: [{ articleId: 'x', qty: 4, cost: 250 }, { articleId: '', qty: 2, cost: 1 }, { articleId: 'y', qty: 0, cost: 9 }],
+  });
+  assert.equal(purchase.total, 1000);
+  assert.equal(movements.length, 1);
+  assert.deepEqual([movements[0].data.qty, movements[0].data.cost, movements[0].data.type], [4, 250, 'achat']);
+  assert.throws(() => buildPurchase({ id: 'p', lines: [] }));
+  assert.throws(() => buildPurchase({ id: 'p', lines: [{ articleId: 'x', qty: 1, cost: -1 }] }));
+});
+
+test('le rapport exclut les ventes annulées et répartit la remise', () => {
+  const sale = (at, cancelled = false) => ({
+    at, cancelled, payment: 'MVola', by: 'Soa', subtotal: 1000, discount: 100, total: 900,
+    lines: [{ articleId: 'x', name: 'X', price: 500, qty: 2, cost: 300 }],
+  });
+  const r = salesReport([sale(10), sale(20, true), sale(99)], { from: 0, to: 50 });
+  assert.equal(r.count, 1);
+  assert.equal(r.revenue, 900);
+  assert.equal(r.margin, 300);
+  assert.equal(r.articles[0].revenue, 900);
+  assert.deepEqual(r.byPayment, [['MVola', 900]]);
+});
