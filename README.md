@@ -10,7 +10,7 @@ Node.js 22.13 ou plus récent, aucune dépendance à installer.
 npm start
 ```
 
-Ouvrir <http://localhost:8787>. La clé de synchronisation est créée dans `data/token.txt` : la coller dans **Réglages** sur chaque appareil.
+Ouvrir <http://localhost:8787>. La clé boutique est créée dans `data/token.txt` : la saisir dans **Réglages** pour relier chaque appareil.
 
 ```bash
 npm test
@@ -33,9 +33,19 @@ Sans utilisateur, l'application est ouverte à tous. Dans **Réglages → Utilis
 
 - **Gérant** : tout.
 - **Vendeur** : tableau de bord, caisse, ventes et articles en lecture ; pas d'annulation, d'achat, d'inventaire ni de réglages.
-- **PIN oublié** : la clé de synchronisation enregistrée sur l'appareil ouvre une session gérant de récupération.
+- **PIN oublié** : saisir la clé boutique ouvre une session gérant de récupération.
 
 Le PIN est haché (PBKDF2-SHA256, sel aléatoire) et synchronisé, pour se connecter hors ligne sur n'importe quel appareil.
+
+### Droits vérifiés par le serveur
+
+| Identifiant | Obtenu | Droits |
+| --- | --- | --- |
+| Clé boutique (`data/token.txt`) | Créée au premier démarrage | Tous ; conservée sur l'appareil seulement tant qu'aucun utilisateur n'existe |
+| Jeton d'appareil | Échangé contre la clé boutique dès qu'il y a des utilisateurs | Lecture ; la clé boutique est alors effacée de l'appareil (seule son empreinte reste, pour la récupération) |
+| Session utilisateur (90 jours) | Saisie du PIN en ligne (`POST /api/login`, blocage après 5 erreurs) | Écriture selon le rôle, relu à chaque synchro |
+
+Chaque changement porte son auteur. Le serveur refuse au vendeur tout ce qui n'est pas **sa** vente et les sorties de stock qui correspondent exactement à ses lignes (même article, quantité et dépôt). Un changement refusé est annulé sur l'appareil avec la version du serveur. Un changement fait hors ligne par un utilisateur sans session n'est pas perdu : il attend, et la pastille « Reconnexion requise » redemande le PIN.
 
 ## Comment marche le hors ligne
 
@@ -58,7 +68,9 @@ Les service workers exigent **HTTPS** (ou `localhost`). Un téléphone qui ouvre
 
 ## Limites de ce premier jet
 
-- Les rôles sont appliqués par l'application, pas par le serveur : toute personne qui détient la clé de synchronisation peut écrire n'importe quelle donnée. Pas de multi-entreprise.
+- La clé boutique donne tous les droits : la garder hors des appareils des vendeurs. Les jetons d'appareil ne sont pas encore révocables un par un (changer la clé ne les invalide pas). Pas de multi-entreprise.
+- Le vendeur lit toutes les données synchronisées (coûts compris).
+- Un utilisateur désactivé alors qu'il avait des ventes hors ligne non envoyées : ces ventes restent bloquées sur l'appareil.
 - Le PIN est un contrôle d'accès entre collègues : un PIN de 4 chiffres reste devinable par quelqu'un qui copie les données de l'appareil.
 - Données locales non chiffrées sur l'appareil.
 - Une horloge d'appareil très en avance peut gagner les conflits de « dernière écriture ».
