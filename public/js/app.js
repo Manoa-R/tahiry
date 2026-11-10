@@ -27,11 +27,12 @@ const ROUTES = {
   purchases: ['Achats', 'M3 4h2l2 11h11l2-8H6M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2M17 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2'],
   inventory: ['Inventaire', 'M9 4h6v3H9zM6 5h3M15 5h3v16H6V5M9 12l2 2 4-4'],
   sales: ['Ventes', 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6'],
+  reports: ['Rapports', 'M4 20V10M10 20V4M16 20v-7M22 20H2'],
   partners: ['Partenaires', 'M16 19c0-3-2-5-5-5s-5 2-5 5M11 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6M17 11a3 3 0 0 0 0-6M21 19c0-2-1-4-3-4.500'],
   settings: ['Réglages', 'M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4M14 4h4v4h-4zM6 10h4v4H6zM12 16h4v4h-4z'],
 };
 
-const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null };
+const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7' };
 let renderPending = false;
 
 const route = () => { const r = location.hash.slice(1); return ROUTES[r] ? r : 'dashboard'; };
@@ -168,6 +169,30 @@ const views = {
       ${list.length ? html`<div class="table-wrap"><table><thead><tr><th>Article</th><th class="num">Théorique</th><th style="width:130px">Compté</th><th class="num">Écart</th></tr></thead><tbody>
       ${list.map((a) => { const q = stockAt(st, a.id, depot); return html`<tr><td>${a.name}</td><td class="num">${num.format(q)}</td><td><input type="number" step="any" min="0" inputmode="decimal" aria-label="Quantité comptée de ${a.name}" data-count="${a.id}" data-theory="${q}" value="${state.counts[a.id] ?? ''}"></td><td class="num" id="gap-${a.id}">${gapText(a.id, q)}</td></tr>`; })}
       </tbody></table></div>` : html`<div class="card empty">Créez d’abord des articles.</div>`}`;
+  },
+
+  reports() {
+    const r = currentReport();
+    const pct = (part, total) => (total ? Math.round((part / total) * 100) : 0);
+    const bars = (entries) => entries.map(([label, value]) => html`<div class="bar-row"><span>${label}</span><span class="num">${ar(value)}</span>
+      <div class="bar"><div style="width:${pct(value, r.revenue)}%"></div></div></div>`);
+    return html`<div class="toolbar"><select aria-label="Période" data-change="setPeriod">${Object.entries(PERIODS).map(([k, label]) => html`<option value="${k}" ${k === state.reportPeriod ? new Safe('selected') : ''}>${label}</option>`)}</select>
+      <span class="grow"></span><button class="btn" data-act="exportReport" ${r.count ? '' : new Safe('disabled')}>Exporter CSV</button></div>
+      <div class="kpis">
+        <div class="card kpi"><div class="label">Chiffre d’affaires</div><div class="value">${ar(r.revenue)}</div><div class="muted small">dont ${ar(r.discount)} de remises</div></div>
+        <div class="card kpi"><div class="label">Tickets</div><div class="value">${r.count}</div><div class="muted small">panier moyen ${ar(r.average)}</div></div>
+        <div class="card kpi"><div class="label">Marge brute</div><div class="value">${ar(r.margin)}</div><div class="muted small">taux ${pct(r.margin, r.revenue)} %</div></div>
+        <div class="card kpi"><div class="label">Coût des ventes</div><div class="value">${ar(r.cost)}</div><div class="muted small">au coût moyen du jour de vente</div></div>
+      </div>
+      ${r.uncosted ? html`<p class="muted small">${r.uncosted} ligne(s) de vente sans coût enregistré (ventes antérieures à cette version) : leur marge est surestimée.</p>` : ''}
+      ${r.count ? html`<div class="columns">
+        <section class="card"><h2>Par mode de paiement</h2>${bars(r.byPayment)}</section>
+        <section class="card"><h2>Par vendeur</h2>${bars(r.bySeller)}</section></div>
+        <h2 style="margin-top:16px">Articles vendus</h2>
+        <div class="table-wrap"><table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">CA</th><th class="num">Marge</th><th class="num">Taux</th></tr></thead><tbody>
+        ${r.articles.map((a) => html`<tr><td>${store.get('articles', a.articleId)?.name ?? a.name}</td><td class="num">${num.format(a.qty)}</td><td class="num">${ar(a.revenue)}</td>
+          <td class="num ${a.margin < 0 ? 'neg' : ''}">${ar(a.margin)}</td><td class="num">${pct(a.margin, a.revenue)} %</td></tr>`)}
+        </tbody></table></div>` : html`<div class="card empty">Aucune vente sur cette période.</div>`}`;
   },
 
   sales() {
@@ -424,16 +449,47 @@ async function loadDemo() {
   syncNow();
 }
 
-function exportCsv() {
-  // Préfixe les cellules qui seraient interprétées comme formules par un tableur.
-  const cell = (v) => { let s = String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; return `"${s.replace(/"/g, '""')}"`; };
-  const st = stock();
-  const rows = [['Article', 'Catégorie', 'Code', 'Coût', 'Prix', ...depots().map((d) => d.name), 'Total']];
-  for (const a of articles()) rows.push([a.name, a.category, a.code, a.cost, a.price, ...depots().map((d) => stockAt(st, a.id, d.id)), stockTotal(st, a.id)]);
+function downloadCsv(filename, rows) {
+  // Texte commençant par = + - @ : préfixé pour qu'un tableur ne l'exécute pas comme formule.
+  // Les nombres restent des nombres (un stock négatif n'est pas une formule).
+  const cell = (v) => {
+    if (typeof v === 'number') return String(v).replace('.', ',');
+    let s = String(v ?? '');
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return `"${s.replace(/"/g, '""')}"`;
+  };
   const blob = new Blob(['﻿' + rows.map((r) => r.map(cell).join(';')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'stock-tahiry.csv' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: filename });
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+function exportCsv() {
+  const st = stock();
+  const cmp = costs();
+  const rows = [['Article', 'Catégorie', 'Code', 'Coût moyen', 'Prix', ...depots().map((d) => d.name), 'Total']];
+  for (const a of articles()) rows.push([a.name, a.category, a.code, costOf(cmp, a), a.price || 0, ...depots().map((d) => stockAt(st, a.id, d.id)), stockTotal(st, a.id)]);
+  downloadCsv('stock-tahiry.csv', rows);
+}
+
+const PERIODS = { today: 'Aujourd’hui', d7: '7 derniers jours', d30: '30 derniers jours', month: 'Ce mois', all: 'Tout' };
+function periodRange(key) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  if (key === 'today') return { from: +start };
+  if (key === 'd7') return { from: +start - 6 * 864e5 };
+  if (key === 'd30') return { from: +start - 29 * 864e5 };
+  if (key === 'month') return { from: +new Date(start.getFullYear(), start.getMonth(), 1) };
+  return {};
+}
+const currentReport = () => salesReport(store.list('sales'), periodRange(state.reportPeriod));
+
+function exportReportCsv() {
+  const r = currentReport();
+  downloadCsv(`ventes-${state.reportPeriod}.csv`, [
+    ['Article', 'Quantité', 'Chiffre d’affaires', 'Marge'],
+    ...r.articles.map((a) => [rawName('articles', a.articleId) === '—' ? a.name : rawName('articles', a.articleId), a.qty, a.revenue, a.margin]),
+  ]);
 }
 
 function addToCart(a) {
@@ -449,6 +505,7 @@ const actions = {
   print: () => window.print(),
   demo: loadDemo,
   exportCsv,
+  exportReport: exportReportCsv,
   install: async () => { await state.installEvent?.prompt(); state.installEvent = null; render(); },
   articleNew: () => articleForm(),
   articleEdit: ({ id }) => articleForm(store.get('articles', id)),
@@ -577,6 +634,7 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', async (e) => {
   const t = e.target;
+  if (t.dataset.change === 'setPeriod') { state.reportPeriod = t.value; render(); }
   if (t.dataset.change === 'setDepot' || t.dataset.change === 'setDepotInv') {
     await store.setMeta({ depotId: t.value });
     if (t.dataset.change === 'setDepotInv') state.counts = {};

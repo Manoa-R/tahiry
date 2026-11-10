@@ -121,7 +121,7 @@ export function salesReport(sales, { from = -Infinity, to = Infinity } = {}) {
   const byPayment = new Map();
   const bySeller = new Map();
   const byArticle = new Map();
-  let revenue = 0, cost = 0, discount = 0;
+  let revenue = 0, cost = 0, discount = 0, uncosted = 0;
   for (const s of kept) {
     revenue += s.total;
     discount += s.discount || 0;
@@ -130,6 +130,7 @@ export function salesReport(sales, { from = -Infinity, to = Infinity } = {}) {
     // La remise est répartie au prorata pour que la somme par article égale le CA.
     const ratio = s.subtotal ? s.total / s.subtotal : 0;
     for (const l of s.lines) {
+      if (typeof l.cost !== 'number') uncosted += 1;
       const lineCost = (l.cost || 0) * l.qty;
       cost += lineCost;
       const a = byArticle.get(l.articleId) ?? { articleId: l.articleId, name: l.name, qty: 0, revenue: 0, margin: 0 };
@@ -143,6 +144,7 @@ export function salesReport(sales, { from = -Infinity, to = Infinity } = {}) {
   const sortDesc = (m) => [...m].sort((a, b) => b[1] - a[1]);
   return {
     count: kept.length,
+    uncosted,
     revenue,
     discount,
     cost: Math.round(cost),

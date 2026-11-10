@@ -117,3 +117,7 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 
 dialog:has(.wide) { width: min(720px, calc(100vw - 32px)); }
 dialog td select, dialog td input { min-width: 70px; }
+.bar-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; margin-bottom: 10px; }
+.bar { grid-column: 1 / -1; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); border-radius: 3px; }
+.num.neg { color: var(--danger); }

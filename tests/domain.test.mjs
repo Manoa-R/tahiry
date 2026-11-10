@@ -106,4 +106,6 @@ test('le rapport exclut les ventes annulées et répartit la remise', () => {
   assert.equal(r.margin, 300);
   assert.equal(r.articles[0].revenue, 900);
   assert.deepEqual(r.byPayment, [['MVola', 900]]);
+  assert.equal(r.uncosted, 0);
+  assert.equal(salesReport([{ ...sale(1), lines: [{ articleId: 'x', price: 1, qty: 1 }] }]).uncosted, 1);
 });
