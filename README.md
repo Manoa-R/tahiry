@@ -18,11 +18,24 @@ npm test
 
 ## Fonctions
 
-- Tableau de bord : ventes du jour, valeur du stock, alertes
+- Tableau de bord : ventes du jour, valeur du stock au coût moyen, alertes
 - Caisse : recherche, douchette, remise, Espèces / MVola / Orange Money / Airtel Money, ticket imprimable
 - Articles, catégories, seuils, export CSV
-- Mouvements : entrées, sorties, transferts multi-dépôts
+- Achats : réceptions fournisseurs multi-lignes, coût moyen pondéré (CUMP)
+- Mouvements : entrées valorisées, sorties, transferts multi-dépôts
 - Inventaire avec écarts, annulation de vente, clients et fournisseurs
+- Rapports : chiffre d'affaires, marge, panier moyen, paiements, vendeurs, articles, par période, export CSV
+- Utilisateurs : rôles gérant / vendeur, code PIN, verrouillage après 15 min d'inactivité
+
+## Utilisateurs et rôles
+
+Sans utilisateur, l'application est ouverte à tous. Dans **Réglages → Utilisateurs**, créer le premier gérant active l'écran de connexion sur tous les appareils synchronisés.
+
+- **Gérant** : tout.
+- **Vendeur** : tableau de bord, caisse, ventes et articles en lecture ; pas d'annulation, d'achat, d'inventaire ni de réglages.
+- **PIN oublié** : la clé de synchronisation enregistrée sur l'appareil ouvre une session gérant de récupération.
+
+Le PIN est haché (PBKDF2-SHA256, sel aléatoire) et synchronisé, pour se connecter hors ligne sur n'importe quel appareil.
 
 ## Comment marche le hors ligne
 
@@ -45,9 +58,11 @@ Les service workers exigent **HTTPS** (ou `localhost`). Un téléphone qui ouvre
 
 ## Limites de ce premier jet
 
-- Une seule clé partagée par installation : ni comptes utilisateurs, ni rôles, ni multi-entreprise.
+- Les rôles sont appliqués par l'application, pas par le serveur : toute personne qui détient la clé de synchronisation peut écrire n'importe quelle donnée. Pas de multi-entreprise.
+- Le PIN est un contrôle d'accès entre collègues : un PIN de 4 chiffres reste devinable par quelqu'un qui copie les données de l'appareil.
 - Données locales non chiffrées sur l'appareil.
 - Une horloge d'appareil très en avance peut gagner les conflits de « dernière écriture ».
 - Tout est chargé en mémoire : adapté à une boutique, pas à des millions de mouvements.
 - Pas encore d'app native sur les stores ; `/api` accepte déjà le CORS pour un empaquetage Capacitor.
-- Pas de facturation PDF, comptabilité, paie ni commandes fournisseurs.
+- Pas de facturation PDF, comptabilité, paie, ni bons de commande fournisseurs (seulement les réceptions).
+- Les ventes enregistrées avant l'ajout du coût figé ont une marge surestimée (signalé dans les rapports).
