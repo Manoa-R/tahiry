@@ -109,3 +109,27 @@ test('le rapport exclut les ventes annulées et répartit la remise', () => {
   assert.equal(r.uncosted, 0);
   assert.equal(salesReport([{ ...sale(1), lines: [{ articleId: 'x', price: 1, qty: 1 }] }]).uncosted, 1);
 });
+
+import { makeCredentials, checkPin, validatePin, assertKeepsManager } from '../public/js/domain.js';
+
+test('le PIN est vérifié sans être stocké en clair', async () => {
+  const cred = await makeCredentials('2468');
+  assert.ok(!JSON.stringify(cred).includes('2468'));
+  assert.equal(await checkPin(cred, '2468'), true);
+  assert.equal(await checkPin(cred, '2469'), false);
+  assert.equal(await checkPin({}, '2468'), false);
+});
+
+test('le PIN doit compter 4 à 8 chiffres', () => {
+  assert.throws(() => validatePin('123'));
+  assert.throws(() => validatePin('12a4'));
+  validatePin('12345678');
+});
+
+test('on ne peut pas retirer le dernier gérant actif', () => {
+  const users = [{ id: 'g', role: 'gerant' }, { id: 'v', role: 'vendeur' }];
+  assert.throws(() => assertKeepsManager(users, 'g', { role: 'vendeur' }));
+  assert.throws(() => assertKeepsManager(users, 'g', { role: 'gerant', active: false }));
+  assertKeepsManager([...users, { id: 'g2', role: 'gerant' }], 'g', { role: 'vendeur' });
+  assertKeepsManager(users, 'v', { role: 'vendeur', active: false });
+});

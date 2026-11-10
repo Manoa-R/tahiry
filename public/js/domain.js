@@ -171,3 +171,46 @@ export function buildInventory({ id, depotId, counts, stock, by, at }) {
   }
   return movements;
 }
+
+// --- Utilisateurs et rôles
+export const ROLES = { gerant: 'Gérant', vendeur: 'Vendeur' };
+// Écrans et actions réservés au gérant ; le vendeur garde caisse, ventes, articles en lecture.
+export const SELLER_ROUTES = new Set(['dashboard', 'pos', 'sales', 'articles']);
+
+export function validatePin(pin) {
+  if (!/^\d{4,8}$/.test(pin)) throw new Error('Le code PIN doit contenir 4 à 8 chiffres');
+}
+
+const toHex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+
+// PBKDF2 ralentit l'essai de codes, sans rendre un PIN de 4 chiffres inviolable :
+// c'est un contrôle d'accès entre collègues, pas une protection des données de l'appareil.
+export async function hashPin(pin, salt) {
+  if (!globalThis.crypto?.subtle) throw new Error('Codes PIN indisponibles : ouvrez l’application en HTTPS ou sur localhost');
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations: 120_000 }, key, 256);
+  return toHex(bits);
+}
+
+export async function makeCredentials(pin) {
+  validatePin(pin);
+  const salt = newId();
+  return { salt, pinHash: await hashPin(pin, salt) };
+}
+
+export async function checkPin(user, pin) {
+  if (!user?.pinHash) return false;
+  const hash = await hashPin(pin, user.salt);
+  let diff = hash.length ^ user.pinHash.length;
+  for (let i = 0; i < hash.length; i++) diff |= hash.charCodeAt(i) ^ user.pinHash.charCodeAt(i);
+  return diff === 0;
+}
+
+// Empêche de retirer le dernier gérant actif (sinon plus personne ne peut administrer).
+export function assertKeepsManager(users, changedId, next) {
+  const managers = users.filter((u) => u.active !== false && u.role === 'gerant');
+  const stillManager = next.active !== false && next.role === 'gerant';
+  if (!stillManager && managers.length === 1 && managers[0].id === changedId) {
+    throw new Error('Il doit rester au moins un gérant actif');
+  }
+}

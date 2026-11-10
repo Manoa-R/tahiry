@@ -4,6 +4,7 @@ import { syncNow, startSync, syncState, onSyncState } from './sync.js';
 import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
   buildTransfer, buildInventory, averageCosts, costOf, buildPurchase, salesReport,
+  ROLES, SELLER_ROUTES, makeCredentials, checkPin, validatePin, assertKeepsManager,
 } from './domain.js';
 
 // --- Rendu : toute valeur interpolée est échappée, y compris les données synchronisées.
@@ -41,7 +42,30 @@ const depots = () => store.list('depots').sort((a, b) => a.name.localeCompare(b.
 const partners = (kind) => store.list('partners').filter((p) => !kind || p.kind === kind).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
 const stock = () => computeStock(store.list('movements'));
 const costs = () => averageCosts(store.list('movements'));
-const seller = () => store.meta.seller || 'Appareil';
+// --- Utilisateurs : sans aucun compte actif, l'application reste ouverte (mode boutique seule).
+const SESSION_KEY = 'tahiry-user';
+const session = {
+  get() { try { return sessionStorage.getItem(SESSION_KEY); } catch { return null; } },
+  set(id) { try { if (id) sessionStorage.setItem(SESSION_KEY, id); else sessionStorage.removeItem(SESSION_KEY); } catch { /* navigation privée */ } },
+};
+let currentUserId = session.get();
+let recovery = false;
+const activeUsers = () => store.list('users').filter((u) => u.active !== false).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+const usersEnabled = () => activeUsers().length > 0;
+function currentUser() {
+  if (recovery) return { id: null, name: 'Récupération gérant', role: 'gerant' };
+  const u = store.get('users', currentUserId);
+  return u && u.active !== false ? u : null;
+}
+const isManager = () => !usersEnabled() || currentUser()?.role === 'gerant';
+const isLocked = () => usersEnabled() && !currentUser();
+const allowedRoute = (r) => isManager() || SELLER_ROUTES.has(r);
+const MANAGER_ACTIONS = new Set([
+  'demo', 'articleNew', 'articleEdit', 'articleDelete', 'partnerNew', 'partnerEdit', 'partnerDelete', 'depotNew', 'depotEdit',
+  'moveNew', 'transferNew', 'inventorySave', 'saleCancel', 'purchaseNew', 'userNew', 'userEdit', 'userToggle', 'exportReport',
+]);
+const LOCKED_ACTIONS = new Set(['pickUser', 'forgotPin', 'lockBack', 'sync']);
+const seller = () => currentUser()?.name || store.meta.seller || 'Appareil';
 const currentDepot = () => {
   const d = store.meta.depotId;
   if (store.get('depots', d)) return d;
@@ -225,6 +249,14 @@ const views = {
         <label class="field"><span>Clé de synchronisation</span><input name="token" type="password" value="${m.token ?? ''}" autocomplete="off"></label>
         <div class="row"><button class="btn primary" type="submit">Enregistrer et synchroniser</button></div></form>
         <p class="muted small">En attente d’envoi : <span id="pending-count">${store.outboxCount}</span> · Appareil ${m.deviceId}</p></section>
+      <section class="card"><h2>Utilisateurs</h2>
+        ${usersEnabled() ? '' : html`<p class="muted small">Aucun utilisateur : l’application est ouverte à tous. Créez un gérant pour activer les codes PIN et les rôles.</p>`}
+        ${store.list('users').sort((a, b) => a.name.localeCompare(b.name, 'fr')).map((u) => html`<div class="totals"><span>${u.name} <span class="badge">${ROLES[u.role]}</span>
+          ${u.active === false ? html`<span class="badge danger">désactivé</span>` : ''}</span>
+          <span><button class="btn small" data-act="userEdit" data-id="${u.id}">Modifier</button>
+          <button class="btn small ${u.active === false ? '' : 'danger'}" data-act="userToggle" data-id="${u.id}">${u.active === false ? 'Réactiver' : 'Désactiver'}</button></span></div>`)}
+        <div class="row"><button class="btn" data-act="userNew">${usersEnabled() ? 'Ajouter un utilisateur' : 'Créer le premier gérant'}</button></div>
+        <p class="muted small">Les codes PIN contrôlent l’accès entre collègues ; ils ne chiffrent pas les données de l’appareil.</p></section>
       <section class="card"><h2>Dépôts</h2>${depots().map((d) => html`<div class="totals"><span>${d.name}</span><button class="btn small" data-act="depotEdit" data-id="${d.id}">Renommer</button></div>`)}
         <div class="row"><button class="btn" data-act="depotNew">Ajouter un dépôt</button></div></section>
       <section class="card"><h2>Application</h2><div class="row" style="justify-content:flex-start">
@@ -287,11 +319,128 @@ function gapText(id, theory) {
 // --- Rendu général
 function render() {
   renderPending = false;
-  const r = route();
-  $('#title').textContent = ROUTES[r][0];
-  $('#nav').innerHTML = html`<div class="brand">Tahiry</div>${Object.entries(ROUTES).map(([k, [label, d]]) => html`<a href="#${k}" ${k === r ? new Safe('aria-current="page"') : ''}>${icon(d)}<span>${label}</span></a>`)}`;
-  $('#view').innerHTML = views[r]();
+  document.body.classList.toggle('locked', isLocked());
   renderChip();
+  if (isLocked()) { $('#user-chip').hidden = true; renderLock(); return; }
+  const r = allowedRoute(route()) ? route() : 'dashboard';
+  $('#title').textContent = ROUTES[r][0];
+  $('#nav').innerHTML = html`<div class="brand">Tahiry</div>${Object.entries(ROUTES).filter(([k]) => allowedRoute(k)).map(([k, [label, d]]) => html`<a href="#${k}" ${k === r ? new Safe('aria-current="page"') : ''}>${icon(d)}<span>${label}</span></a>`)}`;
+  $('#view').innerHTML = views[r]();
+  // Le vendeur ne voit pas les boutons réservés au gérant (le clic est aussi refusé).
+  if (!isManager()) document.querySelectorAll('main [data-act]').forEach((el) => { if (MANAGER_ACTIONS.has(el.dataset.act)) el.remove(); });
+  const user = currentUser();
+  const chip = $('#user-chip');
+  chip.hidden = !user;
+  if (user) chip.innerHTML = html`${user.name} · ${ROLES[user.role]} · <u>Verrouiller</u>`;
+}
+
+// --- Écran de verrouillage
+const lock = { userId: null, failures: 0, blockedUntil: 0, forgot: false };
+
+function renderLock() {
+  $('#title').textContent = 'Connexion';
+  $('#nav').innerHTML = html`<div class="brand">Tahiry</div>`;
+  const user = store.get('users', lock.userId);
+  if (lock.forgot) {
+    $('#view').innerHTML = html`<form class="card lock" id="recovery-form"><h2>PIN oublié</h2>
+      <p class="muted small">Saisissez la clé de synchronisation de la boutique pour ouvrir une session gérant temporaire, puis redéfinissez le PIN dans Réglages.</p>
+      <label class="field"><span>Clé de synchronisation</span><input name="key" type="password" autocomplete="off" required></label>
+      <p class="error" hidden></p>
+      <div class="row"><button class="btn" type="button" data-act="lockBack">Retour</button><button class="btn primary" type="submit">Déverrouiller</button></div></form>`;
+    return;
+  }
+  if (!user) {
+    $('#view').innerHTML = html`<div class="card lock"><h2>Qui êtes-vous ?</h2><div class="user-grid">
+      ${activeUsers().map((u) => html`<button class="btn user-btn" data-act="pickUser" data-id="${u.id}"><strong>${u.name}</strong><span class="muted small">${ROLES[u.role]}</span></button>`)}</div>
+      <div class="row"><button class="btn small" data-act="forgotPin">PIN oublié ?</button></div></div>`;
+    return;
+  }
+  $('#view').innerHTML = html`<form class="card lock" id="pin-form"><h2>${user.name}</h2>
+    <label class="field"><span>Code PIN</span><input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off" required autofocus></label>
+    <p class="error" hidden></p>
+    <div class="row"><button class="btn" type="button" data-act="lockBack">Changer d’utilisateur</button><button class="btn primary" type="submit">Entrer</button></div></form>`;
+  $('#pin-form input').focus();
+}
+
+function lockError(form, message) {
+  const box = form.querySelector('.error');
+  box.textContent = message;
+  box.hidden = false;
+}
+
+async function submitPin(form) {
+  const wait = Math.ceil((lock.blockedUntil - Date.now()) / 1000);
+  if (wait > 0) return lockError(form, `Trop d’essais. Réessayez dans ${wait} s.`);
+  const user = store.get('users', lock.userId);
+  try {
+    if (await checkPin(user, form.elements.pin.value)) {
+      Object.assign(lock, { userId: null, failures: 0, blockedUntil: 0 });
+      currentUserId = user.id;
+      session.set(user.id);
+      render();
+      return undefined;
+    }
+  } catch (err) {
+    return lockError(form, err.message);
+  }
+  lock.failures += 1;
+  form.elements.pin.value = '';
+  // Au-delà de 4 erreurs, attente croissante : 30 s, 60 s, 90 s…
+  if (lock.failures >= 5) lock.blockedUntil = Date.now() + (lock.failures - 4) * 30_000;
+  return lockError(form, 'Code PIN incorrect');
+}
+
+function lockNow() {
+  currentUserId = null;
+  recovery = false;
+  session.set(null);
+  if ($('#dlg').open) $('#dlg').close();
+  Object.assign(state, { cart: new Map(), discount: 0 });
+  render();
+}
+
+// Verrouillage automatique après 15 minutes sans activité.
+let idleTimer = null;
+const IDLE_MS = 15 * 60_000;
+function resetIdle() {
+  clearTimeout(idleTimer);
+  if (usersEnabled() && currentUser()) idleTimer = setTimeout(lockNow, IDLE_MS);
+}
+['pointerdown', 'keydown'].forEach((evt) => addEventListener(evt, resetIdle, { passive: true }));
+
+// --- Gestion des utilisateurs (gérant)
+function userForm(u = null) {
+  const first = !usersEnabled();
+  openForm({
+    title: u ? 'Modifier l’utilisateur' : first ? 'Créer le premier gérant' : 'Nouvel utilisateur',
+    values: u ? { name: u.name, role: u.role } : { role: first ? 'gerant' : 'vendeur' },
+    fields: [
+      { name: 'name', label: 'Nom', required: true },
+      { name: 'role', label: 'Rôle', type: 'select', options: (first ? ['gerant'] : Object.keys(ROLES)).map((k) => ({ value: k, label: ROLES[k] })) },
+      { name: 'pin', label: u ? 'Nouveau code PIN (vide = inchangé)' : 'Code PIN (4 à 8 chiffres)', type: 'password', required: !u },
+      { name: 'pin2', label: 'Confirmer le code PIN', type: 'password', required: !u },
+    ],
+    onSubmit: async (v) => {
+      if (v.pin !== v.pin2) throw new Error('Les deux codes PIN ne correspondent pas');
+      if (v.pin || !u) validatePin(v.pin);
+      const id = u?.id ?? newId();
+      const { id: _ignored, ...previous } = u ?? {};
+      const next = { ...previous, name: v.name, role: v.role, active: true };
+      assertKeepsManager(store.list('users'), id, next);
+      if (v.pin) Object.assign(next, await makeCredentials(v.pin));
+      await store.save('users', id, next);
+      if (first) { currentUserId = id; session.set(id); }
+    },
+  });
+}
+
+async function toggleUser({ id }) {
+  const { id: _ignored, ...u } = store.get('users', id);
+  const next = { ...u, active: u.active === false };
+  assertKeepsManager(store.list('users'), id, next);
+  if (!next.active && !confirm(`Désactiver ${u.name} ? Il ne pourra plus se connecter.`)) return;
+  await store.save('users', id, next);
+  if (!next.active && id === currentUserId) lockNow(); else render();
 }
 
 // Une synchro en arrière-plan ne doit pas effacer une saisie en cours.
@@ -501,6 +650,13 @@ function addToCart(a) {
 
 const actions = {
   sync: () => syncNow(),
+  lock: lockNow,
+  pickUser: ({ id }) => { lock.userId = id; renderLock(); },
+  lockBack: () => { Object.assign(lock, { userId: null, forgot: false }); renderLock(); },
+  forgotPin: () => { lock.forgot = true; renderLock(); },
+  userNew: () => userForm(),
+  userEdit: ({ id }) => userForm(store.get('users', id)),
+  userToggle: (d) => toggleUser(d).catch((err) => alert(err.message)),
   closeDlg: () => $('#dlg').close(),
   print: () => window.print(),
   demo: loadDemo,
@@ -603,7 +759,11 @@ const actions = {
 // --- Événements délégués
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
-  if (el && !el.disabled) actions[el.dataset.act]?.(el.dataset, el);
+  if (!el || el.disabled) return;
+  const act = el.dataset.act;
+  if (isLocked() && !LOCKED_ACTIONS.has(act)) return;
+  if (!isManager() && MANAGER_ACTIONS.has(act)) { alert('Action réservée au gérant.'); return; }
+  actions[act]?.(el.dataset, el);
 });
 
 document.addEventListener('input', (e) => {
@@ -665,6 +825,21 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('submit', async (e) => {
+  if (e.target.id === 'pin-form') { e.preventDefault(); await submitPin(e.target); return; }
+  if (e.target.id === 'recovery-form') {
+    e.preventDefault();
+    const key = e.target.elements.key.value.trim();
+    // Seule la clé déjà enregistrée sur cet appareil ouvre la récupération.
+    if (store.meta.token && key === store.meta.token) {
+      recovery = true;
+      lock.forgot = false;
+      location.hash = 'settings';
+      render();
+    } else {
+      lockError(e.target, store.meta.token ? 'Clé incorrecte' : 'Aucune clé de synchronisation n’est enregistrée sur cet appareil');
+    }
+    return;
+  }
   if (e.target.id === 'purchase-form') {
     e.preventDefault();
     const p = state.purchase;
@@ -700,6 +875,7 @@ await store.init();
 store.subscribe(safeRender);
 onSyncState(renderChip);
 render();
+resetIdle();
 startSync();
 // Demande au navigateur de ne pas purger les données locales.
 navigator.storage?.persist?.();
