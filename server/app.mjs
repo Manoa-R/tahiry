@@ -115,7 +115,7 @@ export function createSyncStore(dbPath) {
       touchCredential.run(Date.now(), row.id, Date.now() - 60_000);
       return { status: 'ok', id: row.id };
     },
-    listDevices: () => listDevices.all().map((d) => ({ id: d.id, label: d.label, created: d.created, lastSeen: d.last_seen, revoked: !!d.revoked })),
+    listDevices: () => listDevices.all().map((d) => ({ id: d.id, label: d.label ?? 'Appareil (sans nom)', created: d.created, lastSeen: d.last_seen, revoked: !!d.revoked })),
     revokeDevice(id) {
       db.exec('BEGIN IMMEDIATE');
       try {
