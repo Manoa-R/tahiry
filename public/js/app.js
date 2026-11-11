@@ -2,6 +2,7 @@
 import { store } from './store.js';
 import {
   syncNow, startSync, syncState, onSyncState, registerDevice, loginOnline, verifyShopKey, useAdminKey, hasSession,
+  listDevices, revokeDevice, defaultDeviceLabel,
 } from './sync.js';
 import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
@@ -35,7 +36,7 @@ const ROUTES = {
   settings: ['Réglages', 'M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4M14 4h4v4h-4zM6 10h4v4H6zM12 16h4v4h-4z'],
 };
 
-const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7' };
+const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7', devices: null };
 let renderPending = false;
 
 const route = () => { const r = location.hash.slice(1); return ROUTES[r] ? r : 'dashboard'; };
@@ -65,6 +66,7 @@ const allowedRoute = (r) => isManager() || SELLER_ROUTES.has(r);
 const MANAGER_ACTIONS = new Set([
   'demo', 'articleNew', 'articleEdit', 'articleDelete', 'partnerNew', 'partnerEdit', 'partnerDelete', 'depotNew', 'depotEdit',
   'moveNew', 'transferNew', 'inventorySave', 'saleCancel', 'purchaseNew', 'userNew', 'userEdit', 'userToggle', 'exportReport',
+  'devicesLoad', 'deviceRevoke',
 ]);
 const LOCKED_ACTIONS = new Set(['pickUser', 'forgotPin', 'lockBack', 'sync']);
 const seller = () => currentUser()?.name || store.meta.seller || 'Appareil';
@@ -247,6 +249,7 @@ const views = {
     return html`<div class="settings">
       <section class="card"><h2>Synchronisation</h2><form id="sync-form">
         <label class="field"><span>Nom du vendeur sur cet appareil</span><input name="seller" value="${m.seller ?? ''}" autocomplete="off"></label>
+        <label class="field"><span>Nom de cet appareil (visible par le gérant)</span><input name="deviceLabel" value="${m.deviceLabel ?? ''}" placeholder="${defaultDeviceLabel()}" maxlength="60" autocomplete="off"></label>
         <label class="field"><span>Adresse du serveur (vide = ce site)</span><input name="serverUrl" type="url" value="${m.serverUrl ?? ''}" placeholder="${location.origin}" autocomplete="off"></label>
         <label class="field"><span>${m.deviceToken ? 'Clé boutique (pour réenregistrer l’appareil)' : 'Clé boutique'}</span><input name="token" type="password" autocomplete="off" placeholder="${m.deviceToken || m.token ? 'Enregistrée — laisser vide pour conserver' : 'Clé affichée par le serveur'}"></label>
         <p class="muted small">${m.deviceToken ? 'Appareil enregistré : la clé boutique n’est pas conservée.' : m.token ? 'Clé boutique conservée (aucun utilisateur pour l’instant).' : 'Appareil non relié à un serveur.'}</p>
@@ -260,6 +263,7 @@ const views = {
           <button class="btn small ${u.active === false ? '' : 'danger'}" data-act="userToggle" data-id="${u.id}">${u.active === false ? 'Réactiver' : 'Désactiver'}</button></span></div>`)}
         <div class="row"><button class="btn" data-act="userNew">${usersEnabled() ? 'Ajouter un utilisateur' : 'Créer le premier gérant'}</button></div>
         <p class="muted small">Les codes PIN contrôlent l’accès entre collègues ; ils ne chiffrent pas les données de l’appareil.</p></section>
+      ${(m.deviceToken || m.token) && usersEnabled() ? devicesSection() : ''}
       <section class="card"><h2>Dépôts</h2>${depots().map((d) => html`<div class="totals"><span>${d.name}</span><button class="btn small" data-act="depotEdit" data-id="${d.id}">Renommer</button></div>`)}
         <div class="row"><button class="btn" data-act="depotNew">Ajouter un dépôt</button></div></section>
       <section class="card"><h2>Application</h2><div class="row" style="justify-content:flex-start">
@@ -445,6 +449,31 @@ function userForm(u = null) {
       }
     },
   });
+}
+
+// --- Appareils reliés au serveur (gérant, en ligne)
+function devicesSection() {
+  const d = state.devices;
+  const ago = (ms) => (ms ? dt(ms) : 'jamais');
+  return html`<section class="card" id="devices"><h2>Appareils</h2>
+    ${!d ? html`<p class="muted small">Liste des appareils reliés au serveur, pour révoquer un téléphone perdu ou volé.</p>` : ''}
+    ${d?.error ? html`<p class="error">${d.error}</p>` : ''}
+    ${d?.list ? html`<div class="table-wrap"><table><thead><tr><th>Appareil</th><th>Enregistré</th><th>Dernière activité</th><th></th></tr></thead><tbody>
+      ${d.list.map((x) => html`<tr><td>${x.label} ${x.id === d.current ? html`<span class="badge ok">cet appareil</span>` : ''}</td>
+        <td class="small">${dt(x.created)}</td><td class="small">${ago(x.lastSeen)}</td>
+        <td class="actions">${x.revoked ? html`<span class="badge danger">révoqué</span>` : html`<button class="btn small danger" data-act="deviceRevoke" data-id="${x.id}">Révoquer</button>`}</td></tr>`)}
+      </tbody></table></div>` : ''}
+    <div class="row"><button class="btn" data-act="devicesLoad">${d?.list ? 'Actualiser' : 'Afficher les appareils'}</button></div></section>`;
+}
+
+async function loadDevices() {
+  try {
+    const { devices, current } = await listDevices();
+    state.devices = { list: devices, current };
+  } catch (err) {
+    state.devices = { error: err.status === 403 ? 'Réservé au gérant connecté en ligne : verrouillez puis ressaisissez votre PIN.' : err.message };
+  }
+  if (route() === 'settings') render();
 }
 
 async function toggleUser({ id }) {
@@ -684,6 +713,21 @@ const actions = {
   userNew: () => userForm(),
   userEdit: ({ id }) => userForm(store.get('users', id)),
   userToggle: (d) => toggleUser(d).catch((err) => alert(err.message)),
+  devicesLoad: loadDevices,
+  deviceRevoke: async ({ id }) => {
+    const d = state.devices?.list.find((x) => x.id === id);
+    const self = id === state.devices?.current;
+    if (!confirm(self
+      ? 'Révoquer CET appareil ? Il ne pourra plus synchroniser avant d’être réenregistré avec la clé boutique.'
+      : `Révoquer « ${d?.label ?? 'cet appareil'} » ? Il perdra l’accès au serveur et toutes ses sessions.`)) return;
+    try {
+      await revokeDevice(id);
+      if (self) await syncNow();
+      await loadDevices();
+    } catch (err) {
+      alert(err.message);
+    }
+  },
   closeDlg: () => $('#dlg').close(),
   print: () => window.print(),
   demo: loadDemo,
@@ -894,11 +938,18 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target.elements;
   const key = f.token.value.trim();
-  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: f.serverUrl.value.trim() });
+  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: f.serverUrl.value.trim(), deviceLabel: f.deviceLabel.value.trim() });
   if (key) {
     try {
       // Avec des utilisateurs, la clé ne fait qu'enregistrer l'appareil ; sinon elle est gardée.
-      if (usersEnabled()) await registerDevice(key); else await store.setMeta({ token: key });
+      if (usersEnabled()) {
+        await registerDevice(key);
+        // Nouvel enregistrement = nouvelles sessions : l'utilisateur connecté ressaisit son PIN.
+        const user = currentUser();
+        if (user?.id) { await syncNow(); lockNow(); lock.userId = user.id; renderLock(); return; }
+      } else {
+        await store.setMeta({ token: key });
+      }
     } catch (err) {
       alert(`Enregistrement impossible : ${err.message}`);
     }

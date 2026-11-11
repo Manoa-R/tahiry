@@ -41,7 +41,7 @@ async function post(path, body, bearer = credential()) {
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw Object.assign(new Error(json.error || `Erreur serveur (${res.status})`), { status: res.status });
+    if (!res.ok) throw Object.assign(new Error(json.error || `Erreur serveur (${res.status})`), { status: res.status, revoked: json.revoked === true });
     return json;
   } finally {
     clearTimeout(timer);
@@ -60,9 +60,25 @@ export async function verifyShopKey(key) {
 }
 
 // Échange la clé boutique contre un jeton d'appareil, puis oublie la clé.
+export function defaultDeviceLabel() {
+  const ua = navigator.userAgent;
+  const kind = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'PC Windows' : /Mac/.test(ua) ? 'Mac' : 'Appareil';
+  return store.meta.seller ? `${kind} — ${store.meta.seller}` : kind;
+}
+
 export async function registerDevice(key) {
-  const { deviceToken } = await post('/api/devices', {}, key);
-  await store.setMeta({ deviceToken, token: null, sessions: {}, ...(await rememberKeyHash(key)) });
+  const label = store.meta.deviceLabel || defaultDeviceLabel();
+  const { deviceToken, deviceId } = await post('/api/devices', { label }, key);
+  await store.setMeta({ deviceToken, serverDeviceId: deviceId, token: null, sessions: {}, revokedAt: null, ...(await rememberKeyHash(key)) });
+}
+
+// Gestion des appareils (gérant) : la session du gérant connecté prouve son rôle.
+export async function listDevices() {
+  return post('/api/devices/list', { sessions: store.meta.sessions ?? {} });
+}
+
+export async function revokeDevice(id) {
+  return post('/api/devices/revoke', { id, sessions: store.meta.sessions ?? {} });
 }
 
 export function useAdminKey(key) { adminKey = key; }
@@ -100,7 +116,7 @@ async function dropSessions(authors) {
 }
 
 async function run() {
-  if (!credential()) return setState('unconfigured');
+  if (!credential()) return setState(store.meta.revokedAt ? 'error' : 'unconfigured', 'Appareil révoqué');
   if (!navigator.onLine) return setState('offline');
   setState('syncing');
   try {
@@ -130,7 +146,11 @@ async function run() {
     syncState.lastSync = new Date();
     setState('ok');
   } catch (err) {
-    if (err.status === 401 || err.status === 403) setState('error', err.message);
+    if (err.revoked && !adminKey) {
+      // Appareil révoqué : on oublie ses identifiants ; les données locales et la file restent.
+      await store.setMeta({ deviceToken: null, sessions: {}, revokedAt: Date.now() });
+      setState('error', 'Appareil révoqué');
+    } else if (err.status === 401 || err.status === 403) setState('error', err.message);
     else setState('offline', 'Serveur injoignable');
   }
 }

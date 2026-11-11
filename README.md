@@ -45,6 +45,10 @@ Le PIN est haché (PBKDF2-SHA256, sel aléatoire) et synchronisé, pour se conne
 | Jeton d'appareil | Échangé contre la clé boutique dès qu'il y a des utilisateurs | Lecture ; la clé boutique est alors effacée de l'appareil (seule son empreinte reste, pour la récupération) |
 | Session utilisateur (90 jours) | Saisie du PIN en ligne (`POST /api/login`, blocage après 5 erreurs) | Écriture selon le rôle, relu à chaque synchro |
 
+Une session n'est valable que depuis l'appareil qui l'a ouverte : un jeton copié ne sert pas ailleurs.
+
+**Appareil perdu ou volé** : dans **Réglages → Appareils**, le gérant connecté voit chaque appareil (nom, date d'enregistrement, dernière activité) et peut le révoquer. L'appareil révoqué perd immédiatement l'accès au serveur, ainsi que toutes les sessions ouvertes depuis lui ; ses données locales restent sur place mais ne se synchronisent plus. Pour le réutiliser, ressaisir la clé boutique.
+
 Chaque changement porte son auteur. Le serveur refuse au vendeur tout ce qui n'est pas **sa** vente et les sorties de stock qui correspondent exactement à ses lignes (même article, quantité et dépôt). Un changement refusé est annulé sur l'appareil avec la version du serveur. Un changement fait hors ligne par un utilisateur sans session n'est pas perdu : il attend, et la pastille « Reconnexion requise » redemande le PIN.
 
 ## Comment marche le hors ligne
@@ -68,7 +72,7 @@ Les service workers exigent **HTTPS** (ou `localhost`). Un téléphone qui ouvre
 
 ## Limites de ce premier jet
 
-- La clé boutique donne tous les droits : la garder hors des appareils des vendeurs. Les jetons d'appareil ne sont pas encore révocables un par un (changer la clé ne les invalide pas). Pas de multi-entreprise.
+- La clé boutique donne tous les droits : la garder hors des appareils des vendeurs. Changer la clé boutique ne révoque pas les appareils déjà enregistrés : les révoquer dans Réglages → Appareils. Pas de multi-entreprise.
 - Le vendeur lit toutes les données synchronisées (coûts compris).
 - Un utilisateur désactivé alors qu'il avait des ventes hors ligne non envoyées : ces ventes restent bloquées sur l'appareil.
 - Le PIN est un contrôle d'accès entre collègues : un PIN de 4 chiffres reste devinable par quelqu'un qui copie les données de l'appareil.
