@@ -108,3 +108,40 @@ test('un changement sans auteur venant d’un appareil est refusé, un rejeu est
   const r = await post('/api/sync', { changes: [{ c: 'depots', id: 'x', hlc: '2-0-d', data: { name: 'X' } }, { c: 'articles', id: 'riz', hlc: '1-0-x', data: {} }] }, device);
   assert.deepEqual(r.body.rejected.map((x) => x.id), ['x']);
 }));
+
+test('une session volée ne sert pas depuis un autre appareil', () => shop(async ({ post, device, login }) => {
+  const s = (await login('v', '2222')).body.sessionToken;
+  const other = (await post('/api/devices', { label: 'Autre' }, ADMIN)).body.deviceToken;
+  const r = await post('/api/sync', { sessions: { v: s }, changes: [sale('s1', 'v')] }, other);
+  assert.deepEqual(r.body.deferred.map((d) => d.id), ['s1']);
+  assert.ok(device);
+}));
+
+test('seul le gérant liste et révoque les appareils', () => shop(async ({ post, device, login }) => {
+  const sv = (await login('v', '2222')).body.sessionToken;
+  const sg = (await login('g', '1111')).body.sessionToken;
+  assert.equal((await post('/api/devices/list', { sessions: { v: sv } }, device)).status, 403);
+  const list = await post('/api/devices/list', { sessions: { g: sg } }, device);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.devices.length, 1);
+  assert.equal(list.body.current, list.body.devices[0].id);
+  assert.equal((await post('/api/devices/revoke', { sessions: { v: sv }, id: list.body.current }, device)).status, 403);
+  assert.equal((await post('/api/devices/revoke', { sessions: { g: sg }, id: 'inconnu' }, device)).status, 404);
+}));
+
+test('un appareil révoqué perd l’accès et ses sessions, les autres continuent', () => shop(async ({ post, device, login }) => {
+  const sv = (await login('v', '2222')).body.sessionToken;
+  const phone = await post('/api/devices', { label: 'Téléphone de Soa' }, ADMIN);
+  const { devices } = (await post('/api/devices/list', {}, ADMIN)).body;
+  assert.equal(devices.find((d) => d.id === phone.body.deviceId).label, 'Téléphone de Soa');
+  // Révocation de la caisse principale (jeton « device ») avec la clé boutique.
+  const caisse = devices.find((d) => d.id !== phone.body.deviceId).id;
+  assert.equal((await post('/api/devices/revoke', { id: caisse }, ADMIN)).status, 200);
+  const denied = await post('/api/sync', { sessions: { v: sv }, changes: [sale('s1', 'v')] }, device);
+  assert.equal(denied.status, 401);
+  assert.equal(denied.body.revoked, true);
+  assert.equal((await post('/api/login', { userId: 'v', pin: '2222' }, device)).status, 401);
+  assert.equal((await post('/api/sync', {}, phone.body.deviceToken)).status, 200);
+  const after = (await post('/api/devices/list', {}, ADMIN)).body.devices;
+  assert.equal(after.find((d) => d.id === caisse).revoked, true);
+}));

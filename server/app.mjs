@@ -41,6 +41,12 @@ function openDb(path) {
       hash TEXT PRIMARY KEY, kind TEXT NOT NULL, user_id TEXT, created INTEGER NOT NULL, expires INTEGER
     );
   `);
+  // Migration : identifiant, nom, appareil d'origine d'une session, révocation, dernière activité.
+  const cols = new Set(db.prepare('PRAGMA table_info(credentials)').all().map((c) => c.name));
+  for (const [name, def] of [['id', 'TEXT'], ['label', 'TEXT'], ['device_id', 'TEXT'], ['revoked', 'INTEGER NOT NULL DEFAULT 0'], ['last_seen', 'INTEGER']]) {
+    if (!cols.has(name)) db.exec(`ALTER TABLE credentials ADD COLUMN ${name} ${def}`);
+  }
+  db.exec("UPDATE credentials SET id = lower(hex(randomblob(8))) WHERE id IS NULL");
   return db;
 }
 
@@ -61,8 +67,14 @@ export function createSyncStore(dbPath) {
       deleted = excluded.deleted, seq = excluded.seq`);
   const since = db.prepare('SELECT c, id, data, hlc, deleted, seq FROM records WHERE seq > ? ORDER BY seq LIMIT ?');
   const maxSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) AS s FROM records');
-  const insertCredential = db.prepare('INSERT INTO credentials (hash, kind, user_id, created, expires) VALUES (?, ?, ?, ?, ?)');
-  const findCredential = db.prepare('SELECT kind, user_id, expires FROM credentials WHERE hash = ?');
+  const insertCredential = db.prepare(`INSERT INTO credentials (hash, id, kind, user_id, device_id, label, created, expires)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  const findCredential = db.prepare('SELECT id, kind, user_id, device_id, expires, revoked FROM credentials WHERE hash = ?');
+  const deviceRevoked = db.prepare("SELECT revoked FROM credentials WHERE id = ? AND kind = 'device'");
+  const touchCredential = db.prepare('UPDATE credentials SET last_seen = ? WHERE id = ? AND (last_seen IS NULL OR last_seen < ?)');
+  const listDevices = db.prepare("SELECT id, label, created, last_seen, revoked FROM credentials WHERE kind = 'device' ORDER BY created DESC");
+  const revokeDevice = db.prepare("UPDATE credentials SET revoked = 1 WHERE id = ? AND kind = 'device'");
+  const revokeDeviceSessions = db.prepare("UPDATE credentials SET revoked = 1 WHERE kind = 'session' AND device_id = ?");
 
   const lookup = (c, id) => {
     const row = find.get(c, id);
@@ -72,31 +84,60 @@ export function createSyncStore(dbPath) {
     const u = lookup('users', id);
     return u && u.active !== false ? u : null;
   };
-  const issue = (kind, userId = null, days = null) => {
+  const issue = ({ kind, userId = null, deviceId = null, label = null, days = null }) => {
     const token = newToken();
-    insertCredential.run(sha256(token), kind, userId, Date.now(), days ? Date.now() + days * 864e5 : null);
-    return token;
+    const id = randomBytes(8).toString('hex');
+    insertCredential.run(sha256(token), id, kind, userId, deviceId, label, Date.now(), days ? Date.now() + days * 864e5 : null);
+    return { token, id };
   };
+  // Jeton valide : ni expiré, ni révoqué ; une session meurt avec l'appareil qui l'a ouverte.
   const credential = (token) => {
     if (typeof token !== 'string' || !token) return null;
     const row = findCredential.get(sha256(token));
-    return row && (!row.expires || row.expires > Date.now()) ? row : null;
+    if (!row || row.revoked || (row.expires && row.expires <= Date.now())) return null;
+    if (row.kind === 'session' && row.device_id && deviceRevoked.get(row.device_id)?.revoked !== 0) return null;
+    return row;
   };
 
   return {
     close: () => db.close(),
     activeUser,
-    issueDevice: () => issue('device'),
-    issueSession: (userId) => issue('session', userId, SESSION_DAYS),
-    isDevice: (token) => credential(token)?.kind === 'device',
+    issueDevice: (label) => issue({ kind: 'device', label }),
+    issueSession: (userId, deviceId) => issue({ kind: 'session', userId, deviceId, days: SESSION_DAYS }).token,
+
+    // 'ok' + identifiant, 'revoked', ou null si le jeton n'est pas un jeton d'appareil.
+    deviceStatus(token) {
+      if (typeof token !== 'string' || !token) return null;
+      const row = findCredential.get(sha256(token));
+      if (row?.kind !== 'device') return null;
+      if (row.revoked) return { status: 'revoked' };
+      // Dernière activité enregistrée au plus une fois par minute.
+      touchCredential.run(Date.now(), row.id, Date.now() - 60_000);
+      return { status: 'ok', id: row.id };
+    },
+    listDevices: () => listDevices.all().map((d) => ({ id: d.id, label: d.label, created: d.created, lastSeen: d.last_seen, revoked: !!d.revoked })),
+    revokeDevice(id) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const { changes } = revokeDevice.run(id);
+        revokeDeviceSessions.run(id);
+        db.exec('COMMIT');
+        return changes > 0;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    },
 
     // Résout les sessions envoyées : { userId: jeton } → Map userId → rôle actuel.
     // Le rôle est relu à chaque synchro : un vendeur rétrogradé ou désactivé perd ses droits.
-    resolveAuthors(sessions) {
+    // Une session n'est acceptée que depuis l'appareil qui l'a ouverte (jeton volé inutilisable ailleurs).
+    resolveAuthors(sessions, deviceId = null) {
       const authors = new Map();
       for (const [userId, token] of Object.entries(sessions ?? {})) {
         const cred = credential(token);
-        const user = cred?.kind === 'session' && cred.user_id === userId ? activeUser(userId) : null;
+        const sameDevice = cred && (cred.device_id ?? null) === deviceId;
+        const user = cred?.kind === 'session' && cred.user_id === userId && sameDevice ? activeUser(userId) : null;
         if (user) authors.set(userId, { userId, role: user.role });
       }
       return authors;
@@ -196,9 +237,16 @@ export function createServer({ dbPath, token, publicDir }) {
     const header = req.headers.authorization ?? '';
     if (!header.startsWith('Bearer ')) return null;
     const given = header.slice(7);
-    if (tokenMatches(given, token)) return { admin: true };
-    return store.isDevice(given) ? { admin: false } : null;
+    if (tokenMatches(given, token)) return { admin: true, deviceId: null };
+    const device = store.deviceStatus(given);
+    if (device?.status === 'revoked') return { revoked: true };
+    return device ? { admin: false, deviceId: device.id } : null;
   }
+
+  // Gérant : clé boutique, ou session de gérant ouverte depuis cet appareil.
+  const isManager = (auth, sessions) => auth.admin
+    || [...store.resolveAuthors(sessions, auth.deviceId).values()].some((a) => a.role === 'gerant');
+  const validSessions = (s) => s && typeof s === 'object' && !Array.isArray(s);
 
   async function readJson(req, res) {
     try { return JSON.parse(await readBody(req)) ?? {}; } catch (err) {
@@ -215,16 +263,35 @@ export function createServer({ dbPath, token, publicDir }) {
       || !Number.isInteger(cursor) || cursor < 0 || typeof sessions !== 'object' || Array.isArray(sessions)) {
       return send(res, 400, { error: 'Lot de changements invalide' });
     }
-    send(res, 200, store.sync({ cursor, changes, admin: auth.admin, authors: store.resolveAuthors(sessions) }));
+    send(res, 200, store.sync({ cursor, changes, admin: auth.admin, authors: store.resolveAuthors(sessions, auth.deviceId) }));
   }
 
   // Enregistre un appareil : échange la clé boutique contre un jeton propre à l'appareil.
-  function handleDevice(res, auth) {
+  async function handleDevice(req, res, auth) {
     if (!auth.admin) return send(res, 403, { error: 'Clé boutique requise' });
-    return send(res, 200, { deviceToken: store.issueDevice() });
+    const body = await readJson(req, res);
+    if (!body) return undefined;
+    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 60) : 'Appareil';
+    const { token: deviceToken, id } = store.issueDevice(label);
+    return send(res, 200, { deviceToken, deviceId: id });
   }
 
-  async function handleLogin(req, res) {
+  async function handleDeviceList(req, res, auth) {
+    const body = await readJson(req, res);
+    if (!body) return undefined;
+    if (!validSessions(body.sessions ?? {}) || !isManager(auth, body.sessions)) return send(res, 403, { error: 'Réservé au gérant' });
+    return send(res, 200, { current: auth.deviceId, devices: store.listDevices() });
+  }
+
+  async function handleDeviceRevoke(req, res, auth) {
+    const body = await readJson(req, res);
+    if (!body) return undefined;
+    if (!validSessions(body.sessions ?? {}) || !isManager(auth, body.sessions)) return send(res, 403, { error: 'Réservé au gérant' });
+    if (typeof body.id !== 'string' || !store.revokeDevice(body.id)) return send(res, 404, { error: 'Appareil inconnu' });
+    return send(res, 200, { ok: true });
+  }
+
+  async function handleLogin(req, res, auth) {
     const body = await readJson(req, res);
     if (!body) return;
     const { userId, pin } = body;
@@ -239,7 +306,7 @@ export function createServer({ dbPath, token, publicDir }) {
       return send(res, 401, { error: 'Utilisateur ou code PIN invalide' });
     }
     loginFailures.delete(userId);
-    return send(res, 200, { sessionToken: store.issueSession(userId), role: user.role });
+    return send(res, 200, { sessionToken: store.issueSession(userId, auth.deviceId), role: user.role });
   }
 
   const server = http.createServer(async (req, res) => {
@@ -255,10 +322,13 @@ export function createServer({ dbPath, token, publicDir }) {
         if (pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true });
         if (req.method !== 'POST') return send(res, 404, { error: 'Route inconnue' });
         const auth = authenticate(req);
+        if (auth?.revoked) return send(res, 401, { error: 'Appareil révoqué : saisissez la clé boutique pour le réenregistrer', revoked: true });
         if (!auth) return send(res, 401, { error: 'Clé de synchronisation invalide' });
         if (pathname === '/api/sync') return await handleSync(req, res, auth);
-        if (pathname === '/api/devices') return handleDevice(res, auth);
-        if (pathname === '/api/login') return await handleLogin(req, res);
+        if (pathname === '/api/devices') return await handleDevice(req, res, auth);
+        if (pathname === '/api/devices/list') return await handleDeviceList(req, res, auth);
+        if (pathname === '/api/devices/revoke') return await handleDeviceRevoke(req, res, auth);
+        if (pathname === '/api/login') return await handleLogin(req, res, auth);
         return send(res, 404, { error: 'Route inconnue' });
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
