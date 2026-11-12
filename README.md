@@ -68,7 +68,19 @@ Résolution des conflits :
 
 ## Déployer pour les téléphones
 
-Les service workers exigent **HTTPS** (ou `localhost`). Un téléphone qui ouvre `http://192.168.x.x` aura la synchro mais pas le démarrage hors ligne. Placer le serveur derrière un proxy HTTPS, avec `HOST=0.0.0.0`. Variables : `PORT`, `HOST`, `TAHIRY_TOKEN`, `TAHIRY_DATA`.
+Le plus simple : l'[app Android](#app-android), qui fonctionne avec un serveur local en `http`. Dans le navigateur du téléphone, les service workers exigent **HTTPS** (ou `localhost`) : en ouvrant `http://192.168.x.x`, on a la synchro mais pas le démarrage hors ligne. Placer le serveur derrière un proxy HTTPS, avec `HOST=0.0.0.0`. Variables : `PORT`, `HOST`, `TAHIRY_TOKEN`, `TAHIRY_DATA`.
+
+## App Android
+
+Le dossier `mobile/` empaquette l'application web avec [Capacitor](https://capacitorjs.com). Les fichiers sont embarqués dans l'APK : l'app démarre sans réseau, sans HTTPS ni service worker.
+
+- **Obtenir l'APK** : chaque changement poussé sur `main` le construit dans GitHub Actions (onglet *Actions* → *Android* → artefact `tahiry-apk`). Une étiquette `v*` (`git tag v0.2.0 && git push --tags`) publie l'APK dans les *Releases*.
+- **Installer** : copier `tahiry.apk` sur le téléphone et l'ouvrir (autoriser « sources inconnues »).
+- **Relier** : dans Réglages, saisir l'adresse du serveur de la boutique, par exemple `http://192.168.1.10:8787` (démarrer le serveur avec `HOST=0.0.0.0`), puis la clé boutique.
+- **Construire en local** (JDK 21 et SDK Android requis) : `cd mobile && npm ci && npm run apk`.
+- **Icônes** : `node scripts/make-icons.mjs` régénère celles du web et d'Android.
+
+L'APK est une version de débogage, à installer à la main ; une publication sur le Play Store demandera une clé de signature.
 
 ## Limites de ce premier jet
 
@@ -79,6 +91,6 @@ Les service workers exigent **HTTPS** (ou `localhost`). Un téléphone qui ouvre
 - Données locales non chiffrées sur l'appareil.
 - Une horloge d'appareil très en avance peut gagner les conflits de « dernière écriture ».
 - Tout est chargé en mémoire : adapté à une boutique, pas à des millions de mouvements.
-- Pas encore d'app native sur les stores ; `/api` accepte déjà le CORS pour un empaquetage Capacitor.
+- App Android hors Play Store (APK de débogage) ; pas encore d'app iOS.
 - Pas de facturation PDF, comptabilité, paie, ni bons de commande fournisseurs (seulement les réceptions).
 - Les ventes enregistrées avant l'ajout du coût figé ont une marge surestimée (signalé dans les rapports).
