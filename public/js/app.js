@@ -8,8 +8,9 @@ import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
   buildTransfer, buildInventory, averageCosts, costOf, buildPurchase, salesReport,
   ROLES, SELLER_ROUTES, makeCredentials, checkPin, validatePin, assertKeepsManager,
-  buildInvoice, nextInvoiceNumber,
+  buildInvoice, nextInvoiceNumber, findByCode, round3,
 } from './domain.js';
+import { openScanner } from './scanner.js';
 
 // --- Rendu : toute valeur interpolée est échappée, y compris les données synchronisées.
 class Safe { constructor(s) { this.s = s; } toString() { return this.s; } }
@@ -27,6 +28,7 @@ const icon = (d) => new Safe(`<svg viewBox="0 0 24 24" aria-hidden="true"><path 
 const ROUTES = {
   dashboard: ['Tableau de bord', 'M3 13h8V3H3zM13 21h8V11h-8zM13 3v4h8V3zM3 21h8v-4H3z'],
   pos: ['Caisse', 'M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h3'],
+  scan: ['Scanner', 'M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M7 8v8M10 8v8M13 8v8M17 8v8'],
   articles: ['Articles', 'M3 8l9-5 9 5v8l-9 5-9-5zM3 8l9 5 9-5M12 13v8'],
   movements: ['Mouvements', 'M7 4v15M7 19l-4-4M7 19l4-4M17 20V5M17 5l-4 4M17 5l4 4'],
   purchases: ['Achats', 'M3 4h2l2 11h11l2-8H6M9 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2M17 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2'],
@@ -37,7 +39,7 @@ const ROUTES = {
   settings: ['Réglages', 'M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4M14 4h4v4h-4zM6 10h4v4H6zM12 16h4v4h-4z'],
 };
 
-const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7', devices: null };
+const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7', devices: null, scanned: null };
 let renderPending = false;
 
 const route = () => { const r = location.hash.slice(1); return ROUTES[r] ? r : 'dashboard'; };
@@ -68,6 +70,7 @@ const MANAGER_ACTIONS = new Set([
   'demo', 'articleNew', 'articleEdit', 'articleDelete', 'partnerNew', 'partnerEdit', 'partnerDelete', 'depotNew', 'depotEdit',
   'moveNew', 'transferNew', 'inventorySave', 'saleCancel', 'purchaseNew', 'userNew', 'userEdit', 'userToggle', 'exportReport',
   'devicesLoad', 'deviceRevoke', 'shopEdit',
+  'scanInventory', 'scanPurchase', 'scanCreate', 'scanAssign', 'scanEntry',
 ]);
 const LOCKED_ACTIONS = new Set(['pickUser', 'forgotPin', 'lockBack', 'sync']);
 const seller = () => currentUser()?.name || store.meta.seller || 'Appareil';
@@ -93,7 +96,9 @@ function openForm({ title, fields, values = {}, submit = 'Enregistrer', onSubmit
       ${f.type === 'number' ? new Safe(`step="any" min="${f.min ?? 0}"`) : ''} autocomplete="off">`;
   };
   dlg.innerHTML = html`<form method="dialog"><h2>${title}</h2>
-    ${fields.map((f) => html`<label class="field"><span>${f.label}</span>${control(f)}</label>`)}
+    ${fields.map((f) => (f.scan
+      ? html`<div class="field"><span>${f.label}</span><div class="with-btn">${control(f)}<button class="btn" type="button" data-act="scanField" data-field="${f.name}" aria-label="Scanner le code">${icon(SCAN_ICON)}</button></div></div>`
+      : html`<label class="field"><span>${f.label}</span>${control(f)}</label>`))}
     <p class="error" hidden></p>
     <div class="row"><button class="btn" type="button" data-act="closeDlg">Annuler</button>
     <button class="btn primary" type="submit">${submit}</button></div></form>`;
@@ -155,13 +160,36 @@ const views = {
 
   pos() {
     return html`<div class="pos"><div>
-      <div class="toolbar"><input class="grow" id="pos-search" data-filter="pos" placeholder="Rechercher ou scanner un code-barres" value="${state.posQuery}" autocomplete="off">${depotSelect('setDepot')}</div>
+      <div class="toolbar"><input class="grow" id="pos-search" data-filter="pos" placeholder="Rechercher ou scanner un code-barres" value="${state.posQuery}" autocomplete="off">
+        <button class="btn" data-act="scanPos">${icon(SCAN_ICON)} Scanner</button>${depotSelect('setDepot')}</div>
       <div class="products" id="pos-list">${posList()}</div></div>
       <aside class="card cart" id="cart">${cartView()}</aside></div>`;
   },
 
+  scan() {
+    const a = state.scanned?.article;
+    const st = stock();
+    const card = !state.scanned ? html`<div class="card empty">Scannez un article pour voir son prix et son stock dans chaque dépôt.</div>`
+      : !a ? html`<div class="card"><h2>Code inconnu</h2><p class="mono">${state.scanned.code}</p>
+          <p class="muted small">Aucun article ne porte ce code.</p>
+          ${isManager() ? html`<div class="row" style="justify-content:flex-start"><button class="btn primary" data-act="scanCreate">Créer l’article avec ce code</button>
+            <button class="btn" data-act="scanAssign">Attribuer à un article existant</button></div>` : ''}</div>`
+      : html`<div class="card scan-card"><div class="totals"><h2>${a.name}</h2><span class="value">${ar(a.price || 0)}</span></div>
+          <p class="muted small">${[a.category, a.code, a.unit].filter(Boolean).join(' · ')}</p>
+          <table><thead><tr><th>Dépôt</th><th class="num">Stock</th></tr></thead><tbody>
+          ${depots().map((d) => html`<tr><td>${d.name}</td><td class="num">${num.format(stockAt(st, a.id, d.id))} ${a.unit}</td></tr>`)}
+          <tr><td><strong>Total</strong></td><td class="num"><strong>${num.format(stockTotal(st, a.id))} ${a.unit}</strong></td></tr></tbody></table>
+          ${isManager() ? html`<p class="muted small">Coût moyen : ${ar(costOf(costs(), a))}${a.min ? ` · seuil minimum ${num.format(a.min)}` : ''}</p>` : ''}
+          <div class="row" style="justify-content:flex-start"><button class="btn primary" data-act="scanToCart" data-id="${a.id}">Ajouter au panier</button>
+          ${isManager() ? html`<button class="btn" data-act="scanEntry" data-id="${a.id}">Entrée de stock</button><button class="btn" data-act="articleEdit" data-id="${a.id}">Modifier</button>` : ''}</div></div>`;
+    return html`<div class="scan-page"><button class="btn primary scan-big" data-act="scanLookup">${icon(SCAN_ICON)} Scanner un article</button>
+      <form id="scan-lookup" class="toolbar"><input class="grow" name="code" placeholder="Ou saisir / douchette : code-barres" autocomplete="off"><button class="btn" type="submit">Chercher</button></form>
+      ${card}</div>`;
+  },
+
   articles() {
     return html`<div class="toolbar"><input class="grow" data-filter="articles" placeholder="Rechercher un article" value="${state.articleQuery}" autocomplete="off">
+      <button class="btn" data-act="scanArticle">${icon(SCAN_ICON)} Scanner</button>
       <button class="btn primary" data-act="articleNew">Nouvel article</button>
       <button class="btn" data-act="exportCsv">Exporter CSV</button></div>
       <div id="articles-list">${articlesTable()}</div>`;
@@ -193,7 +221,8 @@ const views = {
     const st = stock();
     const depot = currentDepot();
     const list = articles();
-    return html`<div class="toolbar">${depotSelect('setDepotInv')}<span class="grow muted small">Saisissez les quantités comptées. Les lignes vides sont ignorées.</span>
+    return html`<div class="toolbar">${depotSelect('setDepotInv')}<span class="grow muted small">Saisissez les quantités comptées, ou scannez chaque pièce. Les lignes vides sont ignorées.</span>
+      <button class="btn" data-act="scanInventory" ${list.length ? '' : new Safe('disabled')}>${icon(SCAN_ICON)} Compter au scanner</button>
       <button class="btn primary" data-act="inventorySave" ${list.length ? '' : new Safe('disabled')}>Valider l’inventaire</button></div>
       ${list.length ? html`<div class="table-wrap"><table><thead><tr><th>Article</th><th class="num">Théorique</th><th style="width:130px">Compté</th><th class="num">Écart</th></tr></thead><tbody>
       ${list.map((a) => { const q = stockAt(st, a.id, depot); return html`<tr><td>${a.name}</td><td class="num">${num.format(q)}</td><td><input type="number" step="any" min="0" inputmode="decimal" aria-label="Quantité comptée de ${a.name}" data-count="${a.id}" data-theory="${q}" value="${state.counts[a.id] ?? ''}"></td><td class="num" id="gap-${a.id}">${gapText(a.id, q)}</td></tr>`; })}
@@ -529,7 +558,7 @@ function articleForm(a = {}) {
     fields: [
       { name: 'name', label: 'Désignation', required: true },
       { name: 'category', label: 'Catégorie' },
-      { name: 'code', label: 'Code-barres ou référence' },
+      { name: 'code', label: 'Code-barres ou référence', scan: true },
       { name: 'unit', label: 'Unité' },
       { name: 'cost', label: 'Coût d’achat (Ar)', type: 'number' },
       { name: 'price', label: 'Prix de vente (Ar)', type: 'number' },
@@ -602,7 +631,8 @@ function renderPurchaseForm() {
       <td><input aria-label="Coût ligne ${i + 1}" type="number" step="any" min="0" inputmode="decimal" data-pl="${i}:cost" value="${l.cost}"></td>
       <td><button class="btn small" type="button" data-act="purchaseRemoveLine" data-i="${i}" aria-label="Retirer la ligne ${i + 1}">×</button></td></tr>`)}
     </tbody></table></div>
-    <div class="row" style="justify-content:space-between"><button class="btn" type="button" data-act="purchaseAddLine">Ajouter une ligne</button>
+    <div class="row" style="justify-content:space-between"><span><button class="btn" type="button" data-act="purchaseAddLine">Ajouter une ligne</button>
+      <button class="btn" type="button" data-act="scanPurchase">${icon(SCAN_ICON)} Scanner</button></span>
       <strong>Total : <span id="purchase-total">${ar(purchaseTotal())}</span></strong></div>
     <label class="field"><span>Référence (bon de livraison, facture…)</span><input data-pf="note" value="${p.note}" autocomplete="off"></label>
     <p class="error" hidden></p>
@@ -730,12 +760,12 @@ function showInvoice(inv) {
 
 async function loadDemo() {
   const items = [
-    ['riz', 'Riz Makalioka 1 kg', 'Épicerie', '6200000000011', 'kg', 3200, 4000, 20, 120],
-    ['huile', 'Huile 1 L', 'Épicerie', '6200000000028', 'bouteille', 8500, 10500, 10, 40],
-    ['sucre', 'Sucre 1 kg', 'Épicerie', '6200000000035', 'kg', 4200, 5200, 10, 8],
-    ['savon', 'Savon de ménage', 'Hygiène', '6200000000042', 'pièce', 1500, 2200, 15, 60],
-    ['eau', 'Eau minérale 1,5 L', 'Boissons', '6200000000059', 'bouteille', 2200, 3000, 24, 96],
-    ['cahier', 'Cahier 100 pages', 'Papeterie', '6200000000066', 'pièce', 1800, 2800, 12, 30],
+    ['riz', 'Riz Makalioka 1 kg', 'Épicerie', '6200000000015', 'kg', 3200, 4000, 20, 120],
+    ['huile', 'Huile 1 L', 'Épicerie', '6200000000022', 'bouteille', 8500, 10500, 10, 40],
+    ['sucre', 'Sucre 1 kg', 'Épicerie', '6200000000039', 'kg', 4200, 5200, 10, 8],
+    ['savon', 'Savon de ménage', 'Hygiène', '6200000000046', 'pièce', 1500, 2200, 15, 60],
+    ['eau', 'Eau minérale 1,5 L', 'Boissons', '6200000000053', 'bouteille', 2200, 3000, 24, 96],
+    ['cahier', 'Cahier 100 pages', 'Papeterie', '6200000000060', 'pièce', 1800, 2800, 12, 30],
   ];
   const now = Date.now();
   await store.write([
@@ -799,7 +829,86 @@ function addToCart(a) {
   $('#cart').innerHTML = cartView();
 }
 
+// --- Scan
+const SCAN_ICON = 'M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M7 8v8M10 8v8M13 8v8M17 8v8';
+const byCode = (code) => findByCode(articles(), code);
+const unknown = (code) => ({ ok: false, message: `Code ${code} : aucun article` });
+
+function lookupCode(code) {
+  state.scanned = { code, article: byCode(code) };
+  if (route() !== 'scan') location.hash = '#scan';
+  else render();
+}
+
+function scanPurchaseCode(code) {
+  const a = byCode(code);
+  if (!a) return unknown(code);
+  const p = state.purchase;
+  const line = p.lines.find((l) => l.articleId === a.id) ?? p.lines.find((l) => !l.articleId);
+  if (line) Object.assign(line, { articleId: a.id, qty: (Number(line.qty) || 0) + 1, cost: line.cost === '' ? (a.cost ?? '') : line.cost });
+  else p.lines.push({ articleId: a.id, qty: 1, cost: a.cost ?? '' });
+  renderPurchaseForm();
+  return { ok: true, message: `${a.name} : ${num.format((line ?? p.lines.at(-1)).qty)} reçu(s)` };
+}
+
 const actions = {
+  scanLookup: () => openScanner({ title: 'Scanner un article', onCode: (code) => { const a = byCode(code); lookupCode(code); return a ? { ok: true, message: a.name } : unknown(code); } }),
+  scanPos: () => openScanner({
+    title: 'Caisse — scanner les articles', continuous: true, hint: 'Chaque lecture ajoute une unité au panier.',
+    onCode: (code) => {
+      const a = byCode(code);
+      if (!a) return unknown(code);
+      addToCart(a);
+      return { ok: true, message: `${a.name} — ${num.format(state.cart.get(a.id).qty)} au panier · total ${ar(saleTotals([...state.cart.values()], state.discount).total)}` };
+    },
+  }),
+  scanInventory: () => openScanner({
+    title: `Inventaire — ${rawName('depots', currentDepot())}`, continuous: true, hint: 'Chaque lecture compte une unité de plus.',
+    onCode: (code) => {
+      const a = byCode(code);
+      if (!a) return unknown(code);
+      const n = round3((Number(state.counts[a.id]) || 0) + 1);
+      state.counts[a.id] = String(n);
+      const input = document.querySelector(`[data-count="${CSS.escape(a.id)}"]`);
+      if (input) { input.value = n; $(`#gap-${CSS.escape(a.id)}`).textContent = gapText(a.id, Number(input.dataset.theory)); }
+      return { ok: true, message: `${a.name} : ${num.format(n)} compté(s)` };
+    },
+  }),
+  scanPurchase: () => openScanner({ title: 'Réception — scanner les articles', continuous: true, hint: 'Chaque lecture ajoute une unité reçue.', onCode: scanPurchaseCode }),
+  scanArticle: () => openScanner({
+    title: 'Scanner un article',
+    onCode: (code) => {
+      const a = byCode(code);
+      if (a) setTimeout(() => (isManager() ? articleForm(a) : lookupCode(code)));
+      else if (isManager()) setTimeout(() => articleForm({ code }));
+      else return unknown(code);
+      return { ok: true, message: a ? a.name : 'Nouvel article' };
+    },
+  }),
+  scanField: ({ field }) => openScanner({
+    title: 'Scanner le code',
+    onCode: (code) => {
+      const input = $('#dlg form').elements[field];
+      input.value = code;
+      const other = byCode(code);
+      return other && other.name !== $('#dlg form').elements.name?.value
+        ? { ok: false, message: `Attention : ce code est déjà celui de « ${other.name} »` }
+        : { ok: true, message: code };
+    },
+  }),
+  scanToCart: ({ id }) => { const a = store.get('articles', id); if (!a) return; addToCart(a); location.hash = '#pos'; },
+  scanCreate: () => articleForm({ code: state.scanned.code }),
+  scanAssign: () => openForm({
+    title: 'Attribuer le code',
+    fields: [{ name: 'articleId', label: `Article qui portera le code ${state.scanned.code}`, type: 'select', options: articleOptions() }],
+    onSubmit: async ({ articleId }) => {
+      const a = store.get('articles', articleId);
+      const { id, ...data } = a;
+      await store.save('articles', id, { ...data, code: state.scanned.code });
+      state.scanned = { code: state.scanned.code, article: store.get('articles', id) };
+    },
+  }),
+  scanEntry: ({ id }) => actions.moveNew({ kind: 'entree', articleId: id }),
   // Modifications en attente d'une session : on redemande le PIN pour l'ouvrir.
   sync: () => {
     const user = currentUser();
@@ -842,9 +951,9 @@ const actions = {
   partnerDelete: async ({ id }) => { if (confirm('Supprimer ce partenaire ?')) { await store.remove('partners', id); render(); } },
   depotNew: () => depotForm(),
   depotEdit: ({ id }) => depotForm(store.get('depots', id)),
-  moveNew: ({ kind }) => openForm({
+  moveNew: ({ kind, articleId = '' }) => openForm({
     title: kind === 'entree' ? 'Entrée de stock' : 'Sortie de stock',
-    values: { depotId: currentDepot() },
+    values: { depotId: currentDepot(), articleId },
     fields: [
       { name: 'articleId', label: 'Article', type: 'select', options: articleOptions(), required: true },
       { name: 'depotId', label: 'Dépôt', type: 'select', options: depotOptions(), required: true },
@@ -999,6 +1108,12 @@ document.addEventListener('keydown', (e) => {
 
 document.addEventListener('submit', async (e) => {
   if (e.target.id === 'pin-form') { e.preventDefault(); await submitPin(e.target); return; }
+  if (e.target.id === 'scan-lookup') {
+    e.preventDefault();
+    const code = e.target.elements.code.value.trim();
+    if (code) lookupCode(code);
+    return;
+  }
   if (e.target.id === 'recovery-form') {
     e.preventDefault();
     const key = e.target.elements.key.value.trim();

@@ -19,6 +19,7 @@ npm test
 ## Fonctions
 
 - Tableau de bord : ventes du jour, valeur du stock au coût moyen, alertes
+- Scanner : codes-barres à la caméra (téléphone, tablette, webcam) ou à la douchette, hors ligne
 - Caisse : recherche, douchette, remise, Espèces / MVola / Orange Money / Airtel Money, ticket imprimable
 - Factures A4 depuis une vente : en-tête boutique (NIF, STAT, RCS), client, TVA 20 % en option, montant en lettres, impression ou PDF
 - Articles, catégories, seuils, export CSV
@@ -27,6 +28,22 @@ npm test
 - Inventaire avec écarts, annulation de vente, clients et fournisseurs
 - Rapports : chiffre d'affaires, marge, panier moyen, paiements, vendeurs, articles, par période, export CSV
 - Utilisateurs : rôles gérant / vendeur, code PIN, verrouillage après 15 min d'inactivité
+
+## Scanner
+
+La caméra lit les codes EAN-13, EAN-8, UPC, Code 128, Code 39, ITF, Codabar, QR et Data Matrix. Le lecteur est embarqué dans l'application : il fonctionne hors ligne, y compris sur PC.
+
+| Où | Ce que fait une lecture |
+| --- | --- |
+| **Scanner** (menu) | Fiche de l'article : prix, stock par dépôt, coût moyen ; si le code est inconnu, le gérant crée l'article ou attribue le code à un article existant |
+| **Caisse → Scanner** | Ajoute une unité au panier, en continu |
+| **Inventaire → Compter au scanner** | Compte une unité de plus, en continu |
+| **Réception fournisseur → Scanner** | Ajoute une unité reçue, au dernier coût connu |
+| **Articles → Scanner**, fiche article | Ouvre l'article ou en crée un avec ce code ; remplit le champ code-barres |
+
+Tant qu'un code reste devant la caméra, il ne compte qu'une fois : écarter l'article une seconde pour compter le suivant. Un bip aigu confirme, un bip grave signale un code inconnu. Un même produit lu en UPC-A ou en EAN-13 est reconnu. Sans caméra, saisir le code ou utiliser une douchette dans le même écran.
+
+La caméra demande l'app Android, HTTPS ou `localhost` ; dans un navigateur ouvert en `http://192.168…`, seule la saisie manuelle est disponible.
 
 ## Factures
 
@@ -41,7 +58,7 @@ La facture est figée à l’émission : modifier ensuite un prix, un client ou 
 Sans utilisateur, l'application est ouverte à tous. Dans **Réglages → Utilisateurs**, créer le premier gérant active l'écran de connexion sur tous les appareils synchronisés.
 
 - **Gérant** : tout.
-- **Vendeur** : tableau de bord, caisse, ventes et articles en lecture ; pas d'annulation, d'achat, d'inventaire ni de réglages.
+- **Vendeur** : tableau de bord, caisse, scanner, ventes et articles en lecture ; pas d'annulation, d'achat, d'inventaire ni de réglages.
 - **PIN oublié** : saisir la clé boutique ouvre une session gérant de récupération.
 
 Le PIN est haché (PBKDF2-SHA256, sel aléatoire) et synchronisé, pour se connecter hors ligne sur n'importe quel appareil.

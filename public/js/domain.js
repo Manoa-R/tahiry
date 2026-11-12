@@ -175,7 +175,7 @@ export function buildInventory({ id, depotId, counts, stock, by, at }) {
 // --- Utilisateurs et rôles
 export const ROLES = { gerant: 'Gérant', vendeur: 'Vendeur' };
 // Écrans et actions réservés au gérant ; le vendeur garde caisse, ventes, articles en lecture.
-export const SELLER_ROUTES = new Set(['dashboard', 'pos', 'sales', 'articles']);
+export const SELLER_ROUTES = new Set(['dashboard', 'pos', 'scan', 'sales', 'articles']);
 
 export function validatePin(pin) {
   if (!/^\d{4,8}$/.test(pin)) throw new Error('Le code PIN doit contenir 4 à 8 chiffres');
@@ -278,4 +278,19 @@ export function nextInvoiceNumber(existing, tag, year) {
   const prefix = `FA${String(year).slice(2)}-${tag}-`;
   const max = existing.filter((n) => n.startsWith(prefix)).reduce((m, n) => Math.max(m, Number(n.slice(prefix.length)) || 0), 0);
   return `${prefix}${String(max + 1).padStart(4, '0')}`;
+}
+
+// --- Codes-barres
+
+// Un même produit peut être lu en UPC-A (12 chiffres) ou en EAN-13 (avec un 0 devant) :
+// les codes numériques se comparent sans les zéros de tête, les autres sans la casse.
+export function normalizeCode(code) {
+  const c = String(code ?? '').trim();
+  return /^\d+$/.test(c) ? c.replace(/^0+(?=\d)/, '') : c.toLowerCase();
+}
+
+export function findByCode(articles, code) {
+  const wanted = normalizeCode(code);
+  if (!wanted) return null;
+  return articles.find((a) => a.code && normalizeCode(a.code) === wanted) ?? null;
 }
