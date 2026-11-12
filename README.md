@@ -54,7 +54,7 @@ La caméra demande l'app Android, HTTPS ou `localhost` ; dans un navigateur ouve
 
 **Devis** : remplir le panier de la caisse, toucher **Devis**, choisir le client et la validité (30 jours par défaut). Le devis fige les prix et ne touche pas au stock. Dans **Ventes → Devis**, **Encaisser** recharge le panier ; la vente encaissée marque le devis « transformé », et sa facture reprend le client du devis.
 
-**Avoir** : annuler une vente facturée émet automatiquement un avoir () qui reprend la facture et la référence. Pour une vente annulée avant cette version, le gérant peut l’émettre depuis la facture.
+**Avoir** : annuler une vente facturée émet automatiquement un avoir (`AV26-…`) qui reprend la facture et la référence. Pour une vente annulée avant cette version, le gérant peut l’émettre depuis la facture.
 
 La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas. Numérotation continue par appareil, par année et par type — FA, AV, DV — (`FA26-7A36-0001`), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
 
