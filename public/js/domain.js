@@ -257,28 +257,64 @@ export function amountInWords(value) {
 
 export const VAT_RATE = 0.2;
 
+const partySnapshot = (c) => ({ name: c?.name || 'Client de passage', address: c?.address || '', phone: c?.phone || '', nif: c?.nif || '', stat: c?.stat || '' });
+const shopSnapshot = (s) => ({ name: s.name || '', address: s.address || '', phone: s.phone || '', nif: s.nif || '', stat: s.stat || '', rcs: s.rcs || '', footer: s.footer || '' });
+const lineSnapshot = (lines) => lines.map(({ articleId, name, qty, price }) => ({ articleId, name, qty, price }));
+
+// TVA incluse dans les prix (TTC) : on en déduit la base HT.
+export function vatOf(total, shop) {
+  if (!shop.vat) return null;
+  const amount = Math.round(total - total / (1 + VAT_RATE));
+  return { rate: VAT_RATE, amount, base: total - amount };
+}
+
 // Une facture est une copie figée de la vente, du client et de la boutique au moment de l'émission.
 export function buildInvoice({ number, saleId, sale, client, shop, by, at }) {
   if (sale.cancelled) throw new Error('Une vente annulée ne peut pas être facturée');
-  const ttc = sale.total;
-  const vat = shop.vat ? Math.round(ttc - ttc / (1 + VAT_RATE)) : 0;
   return {
-    number, saleId, saleNumber: sale.number, at, by, payment: sale.payment,
-    lines: sale.lines.map(({ articleId, name, qty, price }) => ({ articleId, name, qty, price })),
-    subtotal: sale.subtotal, discount: sale.discount, total: ttc,
-    vat: shop.vat ? { rate: VAT_RATE, amount: vat, base: ttc - vat } : null,
-    client: { name: client?.name || 'Client de passage', address: client?.address || '', phone: client?.phone || '', nif: client?.nif || '', stat: client?.stat || '' },
-    shop: { name: shop.name || '', address: shop.address || '', phone: shop.phone || '', nif: shop.nif || '', stat: shop.stat || '', rcs: shop.rcs || '', footer: shop.footer || '' },
-    words: `${amountInWords(ttc)} ariary`,
+    kind: 'facture', number, saleId, saleNumber: sale.number, at, by, payment: sale.payment,
+    lines: lineSnapshot(sale.lines), subtotal: sale.subtotal, discount: sale.discount, total: sale.total,
+    vat: vatOf(sale.total, shop), client: partySnapshot(client), shop: shopSnapshot(shop),
+    words: `${amountInWords(sale.total)} ariary`,
   };
 }
 
-// Numérotation continue par appareil et par année : FA26-AB12-0001.
-export function nextInvoiceNumber(existing, tag, year) {
-  const prefix = `FA${String(year).slice(2)}-${tag}-`;
-  const max = existing.filter((n) => n.startsWith(prefix)).reduce((m, n) => Math.max(m, Number(n.slice(prefix.length)) || 0), 0);
-  return `${prefix}${String(max + 1).padStart(4, '0')}`;
+// L'avoir annule une facture : mêmes lignes, même client, même boutique que la facture d'origine.
+export function buildCreditNote({ number, invoice, reason, by, at }) {
+  return {
+    kind: 'avoir', number, invoiceNumber: invoice.number, saleId: invoice.saleId, saleNumber: invoice.saleNumber, at, by, reason,
+    lines: invoice.lines, subtotal: invoice.subtotal, discount: invoice.discount, total: invoice.total,
+    vat: invoice.vat, client: invoice.client, shop: invoice.shop, words: invoice.words,
+  };
 }
+
+export const QUOTE_DAYS = 30;
+const DAY = 86_400_000;
+
+// Un devis fige les prix proposés ; il ne touche pas au stock.
+export function buildQuote({ number, lines, discount, client, partnerId, shop, by, userId, at, days = QUOTE_DAYS }) {
+  if (!lines.length) throw new Error('Le panier est vide');
+  const totals = saleTotals(lines, discount);
+  return {
+    number, at, by, userId, partnerId: partnerId || null, validUntil: at + days * DAY, status: 'ouvert', saleId: null, saleNumber: null,
+    lines: lineSnapshot(lines), ...totals, vat: vatOf(totals.total, shop), client: partySnapshot(client), shop: shopSnapshot(shop),
+    words: `${amountInWords(totals.total)} ariary`,
+  };
+}
+
+export function quoteStatus(quote, now = Date.now()) {
+  if (quote.saleId) return 'transformé';
+  return now > quote.validUntil ? 'expiré' : 'en cours';
+}
+
+// Numérotation continue par appareil, par année et par type : FA26-AB12-0001, AV…, DV…
+export function nextDocNumber(existing, prefix, tag, year) {
+  const head = `${prefix}${String(year).slice(2)}-${tag}-`;
+  const max = existing.filter((n) => n?.startsWith(head)).reduce((m, n) => Math.max(m, Number(n.slice(head.length)) || 0), 0);
+  return `${head}${String(max + 1).padStart(4, '0')}`;
+}
+
+export const nextInvoiceNumber = (existing, tag, year) => nextDocNumber(existing, 'FA', tag, year);
 
 // --- Codes-barres
 

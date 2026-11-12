@@ -168,3 +168,26 @@ test('le vendeur facture sa vente sans pouvoir en changer les montants', () => s
   const again = await post('/api/sync', { sessions: { v: s }, changes: [{ ...invoice('s1'), hlc: '7-0-d' }] }, device);
   assert.deepEqual(again.body.rejected.map((x) => x.id), ['s1:f']);
 }));
+
+test('devis : le vendeur gère les siens et ne peut que transformer ceux des autres', () => shop(async ({ post, device, login }) => {
+  const sv = (await login('v', '2222')).body.sessionToken;
+  const sg = (await login('g', '1111')).body.sessionToken;
+  const quote = (id, userId, extra = {}) => ({ c: 'quotes', id, hlc: '6-0-d', author: userId, data: { number: id, userId, total: 8000, lines: [{ articleId: 'riz', qty: 2, price: 4000 }], status: 'ouvert', saleId: null, saleNumber: null, ...extra } });
+  await post('/api/sync', { sessions: { g: sg }, changes: [quote('qg', 'g')] }, device);
+  const r = await post('/api/sync', {
+    sessions: { v: sv },
+    changes: [
+      quote('qv', 'v'),
+      { ...quote('qg', 'g', { total: 1 }), author: 'v', hlc: '7-0-d' },
+      { ...quote('qx', 'g'), author: 'v' },
+    ],
+  }, device);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.rejected.map((x) => x.id), ['qg', 'qx']);
+  // Transformation du devis du gérant par une vente de la vendeuse.
+  const ok = await post('/api/sync', {
+    sessions: { v: sv },
+    changes: [sale('s1', 'v'), { ...quote('qg', 'g', { status: 'transformé', saleId: 's1', saleNumber: 's1' }), author: 'v', hlc: '8-0-d' }],
+  }, device);
+  assert.deepEqual(ok.body.rejected, []);
+}));

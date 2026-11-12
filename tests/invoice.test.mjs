@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { amountInWords, buildInvoice, nextInvoiceNumber, buildSale } from '../public/js/domain.js';
+import { amountInWords, buildInvoice, nextInvoiceNumber, buildSale, buildCreditNote, buildQuote, quoteStatus, nextDocNumber } from '../public/js/domain.js';
 
 test('montants en toutes lettres', () => {
   const cases = {
@@ -31,4 +31,27 @@ test('la facture fige la vente, le client et la boutique, avec la TVA incluse', 
 test('numérotation continue par appareil et par année', () => {
   assert.equal(nextInvoiceNumber([], 'AB12', 2026), 'FA26-AB12-0001');
   assert.equal(nextInvoiceNumber(['FA26-AB12-0001', 'FA26-AB12-0007', 'FA26-ZZ99-0010', 'FA25-AB12-0050'], 'AB12', 2026), 'FA26-AB12-0008');
+});
+
+test('l’avoir reprend la facture qu’il annule', () => {
+  const inv = buildInvoice({ number: 'FA26-X-0001', saleId: 's1', sale, client: { name: 'Hôtel Soa' }, shop: { name: 'Épicerie', vat: true }, by: 'Rova', at: 2 });
+  const av = buildCreditNote({ number: 'AV26-X-0001', invoice: inv, reason: 'Vente annulée', by: 'Rova', at: 3 });
+  assert.equal(av.kind, 'avoir');
+  assert.equal(av.invoiceNumber, 'FA26-X-0001');
+  assert.deepEqual([av.total, av.vat, av.client.name], [12000, inv.vat, 'Hôtel Soa']);
+});
+
+test('le devis fige les prix, expire et se transforme', () => {
+  const q = buildQuote({ number: 'DV26-X-0001', lines: sale.lines, discount: 1000, client: null, shop: {}, by: 'Soa', userId: 'v', at: 0, days: 30 });
+  assert.deepEqual([q.total, q.status, q.client.name, q.vat], [12000, 'ouvert', 'Client de passage', null]);
+  assert.equal(quoteStatus(q, 29 * 86_400_000), 'en cours');
+  assert.equal(quoteStatus(q, 31 * 86_400_000), 'expiré');
+  assert.equal(quoteStatus({ ...q, saleId: 's9' }, 31 * 86_400_000), 'transformé');
+  assert.throws(() => buildQuote({ number: 'n', lines: [], shop: {} }));
+});
+
+test('chaque type de document a sa propre série', () => {
+  const existing = ['FA26-AB12-0004', 'AV26-AB12-0001'];
+  assert.equal(nextDocNumber(existing, 'AV', 'AB12', 2026), 'AV26-AB12-0002');
+  assert.equal(nextDocNumber(existing, 'DV', 'AB12', 2026), 'DV26-AB12-0001');
 });

@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { checkPin } from '../public/js/domain.js';
 import { refusal } from './permissions.mjs';
 
-export const COLLECTIONS = new Set(['articles', 'depots', 'partners', 'movements', 'sales', 'purchases', 'users', 'invoices', 'settings']);
+export const COLLECTIONS = new Set(['articles', 'depots', 'partners', 'movements', 'sales', 'purchases', 'users', 'invoices', 'settings', 'quotes']);
 // Un mouvement de stock n'est jamais modifié : on le compense par un autre mouvement.
 const IMMUTABLE = new Set(['movements']);
 const MAX_BODY = 5 * 1024 * 1024;

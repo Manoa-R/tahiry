@@ -4,6 +4,13 @@
 
 const SALE_MOVEMENT = /^(.+):v:(\d+)$/;
 
+// JSON à clés triées, pour comparer deux versions d'un document quel que soit l'ordre des champs.
+const canonical = (v) => {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;
+  return JSON.stringify(v);
+};
+
 /**
  * @param {{c: string, id: string, data: object, deleted?: boolean}} change
  * @param {{ role: string, userId: string }} author
@@ -40,12 +47,28 @@ export function refusal(change, author, lookup, batchSales) {
   if (change.c === 'invoices') {
     if (lookup('invoices', change.id)) return 'Modification d’une facture réservée au gérant';
     const inv = change.data;
-    if (change.id !== `${inv.saleId}:f`) return 'Facture mal identifiée';
+    if (typeof inv.saleId !== 'string' || change.id !== `${inv.saleId}:f`) return 'Facture mal identifiée';
     const sale = batchSales.get(inv.saleId) ?? lookup('sales', inv.saleId);
     if (!sale || sale.userId !== author.userId || sale.cancelled) return 'Facture sans vente de cet utilisateur';
     const same = inv.total === sale.total && Array.isArray(inv.lines) && inv.lines.length === sale.lines.length
       && inv.lines.every((l, i) => l.articleId === sale.lines[i].articleId && l.qty === sale.lines[i].qty && l.price === sale.lines[i].price);
     return same ? null : 'Facture différente de la vente';
+  }
+
+  // Devis : le vendeur crée et modifie les siens ; sur celui d'un collègue, il peut seulement
+  // le marquer transformé par une vente qui est la sienne.
+  if (change.c === 'quotes') {
+    const existing = lookup('quotes', change.id);
+    const q = change.data;
+    if (!existing || existing.userId === author.userId) {
+      return q.userId === author.userId ? null : 'Devis attribué à un autre utilisateur';
+    }
+    if (typeof q.saleId !== 'string') return 'Devis d’un autre utilisateur';
+    const sale = batchSales.get(q.saleId) ?? lookup('sales', q.saleId);
+    const { status, saleId, saleNumber, ...rest } = q;
+    const { status: _s, saleId: _i, saleNumber: _n, ...before } = existing;
+    const unchanged = canonical(rest) === canonical(before);
+    return unchanged && sale && sale.userId === author.userId ? null : 'Devis d’un autre utilisateur';
   }
 
   return 'Action réservée au gérant';
