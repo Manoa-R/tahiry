@@ -21,6 +21,7 @@ npm test
 - Tableau de bord : ventes du jour, valeur du stock au coût moyen, alertes
 - Scanner : codes-barres à la caméra (téléphone, tablette, webcam) ou à la douchette, hors ligne
 - Caisse : recherche, douchette, remise, Espèces / MVola / Orange Money / Airtel Money, ticket imprimable
+- Devis depuis la caisse, transformés en vente en un geste ; avoirs automatiques à l’annulation d’une vente facturée
 - Factures A4 depuis une vente : en-tête boutique (NIF, STAT, RCS), client, TVA 20 % en option, montant en lettres, impression ou PDF
 - Articles, catégories, seuils, export CSV
 - Achats : réceptions fournisseurs multi-lignes, coût moyen pondéré (CUMP)
@@ -45,13 +46,17 @@ Tant qu'un code reste devant la caméra, il ne compte qu'une fois : écarter l'a
 
 La caméra demande l'app Android, HTTPS ou `localhost` ; dans un navigateur ouvert en `http://192.168…`, seule la saisie manuelle est disponible.
 
-## Factures
+## Factures, avoirs et devis
 
 1. **Réglages → Fiche boutique** (gérant) : raison sociale, adresse, NIF, STAT, RCS, TVA et mention de bas de page.
 2. **Ventes → Facture** (ou le bouton **Facture** du ticket) : choisir un client enregistré ou saisir son nom, puis émettre.
 3. **Imprimer / PDF** : choisir l’imprimante, ou « Enregistrer au format PDF ».
 
-La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas ; annuler une vente déjà facturée laisse la facture consultable, signalée « à annuler par un avoir ». Numérotation continue par appareil et par année (`FA26-7A36-0001`), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
+**Devis** : remplir le panier de la caisse, toucher **Devis**, choisir le client et la validité (30 jours par défaut). Le devis fige les prix et ne touche pas au stock. Dans **Ventes → Devis**, **Encaisser** recharge le panier ; la vente encaissée marque le devis « transformé », et sa facture reprend le client du devis.
+
+**Avoir** : annuler une vente facturée émet automatiquement un avoir () qui reprend la facture et la référence. Pour une vente annulée avant cette version, le gérant peut l’émettre depuis la facture.
+
+La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas. Numérotation continue par appareil, par année et par type — FA, AV, DV — (`FA26-7A36-0001`), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
 
 ## Utilisateurs et rôles
 
@@ -118,7 +123,7 @@ L'APK est une version de débogage, à installer à la main ; une publication su
 - Une horloge d'appareil très en avance peut gagner les conflits de « dernière écriture ».
 - Tout est chargé en mémoire : adapté à une boutique, pas à des millions de mouvements.
 - App Android hors Play Store (APK de débogage) ; pas encore d'app iOS.
-- Pas d’avoirs, de devis, de comptabilité, de paie, ni de bons de commande fournisseurs (seulement les réceptions).
+- Pas de comptabilité, de paie, ni de bons de commande fournisseurs (seulement les réceptions).
 - Deux appareils qui facturent la même vente hors ligne : une seule facture est gardée après synchro (facturer depuis un seul poste).
 - Un appareil plus récent que le serveur garde en attente les données que le serveur ne connaît pas encore (factures, réglages…), jusqu’à la mise à jour du serveur.
 - Les ventes enregistrées avant l'ajout du coût figé ont une marge surestimée (signalé dans les rapports).

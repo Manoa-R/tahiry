@@ -8,7 +8,7 @@ import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
   buildTransfer, buildInventory, averageCosts, costOf, buildPurchase, salesReport,
   ROLES, SELLER_ROUTES, makeCredentials, checkPin, validatePin, assertKeepsManager,
-  buildInvoice, nextInvoiceNumber, findByCode, round3,
+  buildInvoice, buildCreditNote, buildQuote, quoteStatus, nextDocNumber, QUOTE_DAYS, findByCode, round3,
 } from './domain.js';
 import { openScanner } from './scanner.js';
 
@@ -39,7 +39,7 @@ const ROUTES = {
   settings: ['Réglages', 'M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4M14 4h4v4h-4zM6 10h4v4H6zM12 16h4v4h-4z'],
 };
 
-const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7', devices: null, scanned: null };
+const state = { cart: new Map(), discount: 0, payment: 'Espèces', partnerId: '', posQuery: '', articleQuery: '', counts: {}, installEvent: null, reportPeriod: 'd7', devices: null, scanned: null, salesTab: 'ventes', quoteId: null };
 let renderPending = false;
 
 const route = () => { const r = location.hash.slice(1); return ROUTES[r] ? r : 'dashboard'; };
@@ -70,7 +70,7 @@ const MANAGER_ACTIONS = new Set([
   'demo', 'articleNew', 'articleEdit', 'articleDelete', 'partnerNew', 'partnerEdit', 'partnerDelete', 'depotNew', 'depotEdit',
   'moveNew', 'transferNew', 'inventorySave', 'saleCancel', 'purchaseNew', 'userNew', 'userEdit', 'userToggle', 'exportReport',
   'devicesLoad', 'deviceRevoke', 'shopEdit',
-  'scanInventory', 'scanPurchase', 'scanCreate', 'scanAssign', 'scanEntry',
+  'scanInventory', 'scanPurchase', 'scanCreate', 'scanAssign', 'scanEntry', 'creditIssue',
 ]);
 const LOCKED_ACTIONS = new Set(['pickUser', 'forgotPin', 'lockBack', 'sync']);
 const seller = () => currentUser()?.name || store.meta.seller || 'Appareil';
@@ -254,13 +254,16 @@ const views = {
   },
 
   sales() {
+    const tabs = html`<div class="toolbar tabs">${[['ventes', 'Ventes'], ['devis', 'Devis']].map(([k, label]) => html`<button class="btn ${state.salesTab === k ? 'primary' : ''}" data-act="salesTab" data-tab="${k}">${label}</button>`)}</div>`;
+    if (state.salesTab === 'devis') return html`${tabs}${quotesTable()}`;
     const rows = store.list('sales').sort((a, b) => b.at - a.at).slice(0, 200);
-    if (!rows.length) return html`<div class="card empty">Aucune vente enregistrée.</div>`;
-    return html`<div class="table-wrap"><table><thead><tr><th>Date</th><th>N°</th><th>Paiement</th><th>Vendeur</th><th class="num">Total</th><th></th></tr></thead><tbody>
+    if (!rows.length) return html`${tabs}<div class="card empty">Aucune vente enregistrée.</div>`;
+    return html`${tabs}<div class="table-wrap"><table><thead><tr><th>Date</th><th>N°</th><th>Paiement</th><th>Vendeur</th><th class="num">Total</th><th></th></tr></thead><tbody>
       ${rows.map((s) => html`<tr><td class="small">${dt(s.at)}</td><td class="small">${s.number}</td><td>${s.payment}</td><td class="small">${s.by}</td>
         <td class="num">${ar(s.total)} ${s.cancelled ? html`<span class="badge danger">annulée</span>` : ''}</td>
         <td class="actions"><button class="btn small" data-act="ticket" data-id="${s.id}">Ticket</button>
         ${invoiceOf(s.id) || !s.cancelled ? html`<button class="btn small" data-act="invoice" data-id="${s.id}">${invoiceOf(s.id)?.number ?? 'Facture'}</button>` : ''}
+        ${creditOf(s.id) ? html`<button class="btn small" data-act="creditShow" data-id="${s.id}">${creditOf(s.id).number}</button>` : ''}
         ${s.cancelled ? '' : html`<button class="btn small danger" data-act="saleCancel" data-id="${s.id}">Annuler</button>`}</td></tr>`)}
       </tbody></table></div>`;
   },
@@ -332,7 +335,9 @@ function cartView() {
     </div>
     <div class="totals"><span class="muted">Sous-total</span><span class="num">${ar(totals.subtotal)}</span></div>
     <div class="totals grand"><span>Total</span><span class="num" id="cart-total">${ar(totals.total)}</span></div>
-    <button class="btn primary" style="width:100%" data-act="checkout" ${lines.length ? '' : new Safe('disabled')}>Encaisser</button>`;
+    ${state.quoteId ? html`<p class="muted small">Depuis le devis ${store.get('quotes', state.quoteId)?.number ?? ''} · <button class="link" data-act="quoteDetach">détacher</button></p>` : ''}
+    <div class="cart-actions"><button class="btn" data-act="quoteNew" ${lines.length ? '' : new Safe('disabled')}>Devis</button>
+    <button class="btn primary" data-act="checkout" ${lines.length ? '' : new Safe('disabled')}>Encaisser</button></div>`;
 }
 
 function articlesTable() {
@@ -670,6 +675,52 @@ function showTicket(sale) {
 // --- Factures
 const shopProfile = () => store.get('settings', 'shop') ?? {};
 const invoiceOf = (saleId) => store.get('invoices', `${saleId}:f`);
+const creditOf = (saleId) => store.get('invoices', `${saleId}:av`);
+const withoutId = ({ id, ...rest }) => rest;
+// Séries par appareil, année et type de document : FA, AV, DV.
+const nextNumber = (prefix, collection) => nextDocNumber(store.list(collection).map((d) => d.number), prefix, store.meta.deviceId.slice(0, 4).toUpperCase(), new Date().getFullYear());
+const creditNoteFor = (invoice) => buildCreditNote({ number: nextNumber('AV', 'invoices'), invoice, reason: `Annulation de la vente ${invoice.saleNumber}`, by: seller(), at: Date.now() });
+
+function quotesTable() {
+  const rows = store.list('quotes').sort((a, b) => b.at - a.at).slice(0, 200);
+  if (!rows.length) return html`<div class="card empty">Aucun devis. Remplissez le panier de la caisse puis touchez « Devis ».</div>`;
+  const badge = { 'en cours': '', expiré: 'warn', transformé: 'ok' };
+  return html`<div class="table-wrap"><table><thead><tr><th>Date</th><th>N°</th><th>Client</th><th>Valable jusqu’au</th><th class="num">Total</th><th></th></tr></thead><tbody>
+    ${rows.map((q) => { const st = quoteStatus(q); return html`<tr><td class="small">${dt(q.at)}</td><td class="small">${q.number}</td><td>${q.client.name}</td>
+      <td class="small">${new Date(q.validUntil).toLocaleDateString('fr-FR')}</td>
+      <td class="num">${ar(q.total)} <span class="badge ${badge[st]}">${st}${q.saleNumber ? ` · ${q.saleNumber}` : ''}</span></td>
+      <td class="actions"><button class="btn small" data-act="quoteShow" data-id="${q.id}">Voir</button>
+      ${q.saleId ? '' : html`<button class="btn small primary" data-act="quoteToSale" data-id="${q.id}">Encaisser</button>`}</td></tr>`; })}
+    </tbody></table></div>`;
+}
+
+function quoteForm() {
+  const lines = [...state.cart.values()].filter((l) => l.qty > 0);
+  if (!lines.length) return;
+  const dlg = $('#dlg');
+  dlg.innerHTML = html`<form id="quote-form"><h2>Devis</h2>
+    <label class="field"><span>Client enregistré</span><select name="partnerId"><option value="">—</option>${options(partners('client'), state.partnerId)}</select></label>
+    <label class="field"><span>Ou nom du client</span><input name="clientName" autocomplete="off" placeholder="Client de passage"></label>
+    <label class="field"><span>Validité (jours)</span><input name="days" type="number" min="1" step="1" value="${QUOTE_DAYS}"></label>
+    <p class="muted small">Total ${ar(saleTotals(lines, state.discount).total)}. Le devis fige les prix ; il ne touche pas au stock.</p>
+    <div class="row"><button class="btn" type="button" data-act="closeDlg">Annuler</button><button class="btn primary" type="submit">Établir le devis</button></div></form>`;
+  dlg.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    const partner = f.partnerId.value ? store.get('partners', f.partnerId.value) : null;
+    const client = partner ?? (f.clientName.value.trim() ? { name: f.clientName.value.trim() } : null);
+    const quote = buildQuote({
+      number: nextNumber('DV', 'quotes'), lines, discount: state.discount, client, partnerId: partner?.id, shop: shopProfile(),
+      by: seller(), userId: currentUser()?.id ?? null, at: Date.now(), days: Math.max(1, Number(f.days.value) || QUOTE_DAYS),
+    });
+    const quoteId = newId();
+    await store.write([{ c: 'quotes', id: quoteId, data: quote }]);
+    Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', quoteId: null });
+    render();
+    showDocument({ ...quote, id: quoteId, kind: 'devis' });
+  });
+  dlg.showModal();
+}
 const fiscalIds = (o) => [o.nif && `NIF : ${o.nif}`, o.stat && `STAT : ${o.stat}`, o.rcs && `RCS : ${o.rcs}`].filter(Boolean).join(' · ');
 
 function shopSection() {
@@ -703,8 +754,11 @@ function shopForm() {
 // Émettre une facture : on choisit le client, puis la facture est figée et numérotée.
 function invoiceForm(saleId) {
   const existing = invoiceOf(saleId);
-  if (existing) return showInvoice(existing);
+  if (existing) return showDocument(existing);
   const sale = store.get('sales', saleId);
+  // Vente issue d'un devis : on reprend le client saisi sur le devis.
+  const quote = sale?.quoteId ? store.get('quotes', sale.quoteId) : null;
+  const quoteClient = quote && !quote.partnerId && quote.client.name !== 'Client de passage' ? quote.client.name : '';
   if (!sale || sale.cancelled) return;
   if (usersEnabled() && !isManager() && sale.userId !== currentUser()?.id) {
     alert('Seuls le gérant et la personne qui a fait la vente peuvent la facturer.');
@@ -714,7 +768,7 @@ function invoiceForm(saleId) {
   dlg.innerHTML = html`<form id="invoice-form"><h2>Facturer la vente ${sale.number}</h2>
     ${shopProfile().name ? '' : html`<p class="error">La fiche boutique est vide : le gérant peut la remplir dans Réglages.</p>`}
     <label class="field"><span>Client enregistré</span><select name="partnerId"><option value="">—</option>${options(partners('client'), sale.partnerId)}</select></label>
-    <label class="field"><span>Ou nom du client</span><input name="clientName" autocomplete="off" placeholder="Client de passage"></label>
+    <label class="field"><span>Ou nom du client</span><input name="clientName" autocomplete="off" placeholder="Client de passage" value="${quoteClient}"></label>
     <p class="muted small">Total ${ar(sale.total)}. Une fois émise, la facture ne peut plus être modifiée.</p>
     <div class="row"><button class="btn" type="button" data-act="closeDlg">Annuler</button><button class="btn primary" type="submit">Émettre la facture</button></div></form>`;
   dlg.querySelector('form').addEventListener('submit', async (e) => {
@@ -722,41 +776,59 @@ function invoiceForm(saleId) {
     const f = e.target.elements;
     const partner = f.partnerId.value ? store.get('partners', f.partnerId.value) : null;
     const client = partner ?? (f.clientName.value.trim() ? { name: f.clientName.value.trim() } : null);
-    const tag = store.meta.deviceId.slice(0, 4).toUpperCase();
-    const number = nextInvoiceNumber(store.list('invoices').map((i) => i.number), tag, new Date().getFullYear());
+    const number = nextNumber('FA', 'invoices');
     const invoice = buildInvoice({ number, saleId, sale, client, shop: shopProfile(), by: seller(), at: Date.now() });
     await store.write([{ c: 'invoices', id: `${saleId}:f`, data: invoice }]);
-    showInvoice(invoice);
+    showDocument(invoice);
   });
   if (!dlg.open) dlg.showModal();
 }
 
-function showInvoice(inv) {
-  const { shop, client } = inv;
+const DOC = {
+  facture: { title: 'FACTURE', to: 'Facturé à', stop: 'Arrêtée la présente facture' },
+  avoir: { title: 'AVOIR', to: 'Client', stop: 'Arrêté le présent avoir' },
+  devis: { title: 'DEVIS', to: 'Client', stop: 'Arrêté le présent devis' },
+};
+
+// Facture, avoir ou devis : même mise en page A4, imprimable ou enregistrable en PDF.
+function showDocument(doc) {
+  if (!doc) return;
+  const kind = doc.kind ?? 'facture';
+  const { shop, client } = doc;
+  const day = (ms) => new Date(ms).toLocaleDateString('fr-FR');
+  const sale = doc.saleId ? store.get('sales', doc.saleId) : null;
+  const credit = kind === 'facture' && doc.saleId ? creditOf(doc.saleId) : null;
+  const banner = kind === 'facture' && sale?.cancelled
+    ? (credit ? html`<p class="muted small">Facture annulée par l’avoir ${credit.number}.</p>`
+      : html`<p class="error">Vente annulée après facturation : émettez l’avoir correspondant.
+        ${isManager() ? html`<button class="btn small" data-act="creditIssue" data-id="${doc.saleId}">Émettre l’avoir</button>` : ''}</p>`)
+    : kind === 'devis' ? html`<p class="muted small">Statut : ${quoteStatus(doc)}${doc.saleNumber ? ` (vente ${doc.saleNumber})` : ''}</p>` : '';
+  const ref = kind === 'facture' ? `Vente ${doc.saleNumber}` : kind === 'avoir' ? `Annule la facture N° ${doc.invoiceNumber}` : `Valable jusqu’au ${day(doc.validUntil)}`;
   const dlg = $('#dlg');
-  const cancelled = store.get('sales', inv.saleId)?.cancelled;
-  dlg.innerHTML = html`${cancelled ? html`<p class="error no-print">Vente annulée après facturation : cette facture doit être annulée par un avoir.</p>` : ''}
+  dlg.innerHTML = html`${banner}
   <div id="invoice" class="invoice wide">
     <header class="inv-head">
       <div><strong class="inv-shop">${shop.name || 'Boutique'}</strong>${shop.address ? html`<br>${shop.address}` : ''}${shop.phone ? html`<br>Tél. ${shop.phone}` : ''}
         ${fiscalIds(shop) ? html`<br><span class="small">${fiscalIds(shop)}</span>` : ''}</div>
-      <div class="inv-title"><strong>FACTURE</strong><br>N° ${inv.number}<br>Date : ${new Date(inv.at).toLocaleDateString('fr-FR')}<br><span class="small">Vente ${inv.saleNumber}</span></div>
+      <div class="inv-title"><strong>${DOC[kind].title}</strong><br>N° ${doc.number}<br>Date : ${day(doc.at)}<br><span class="small">${ref}</span></div>
     </header>
-    <div class="inv-client"><span class="small muted">Facturé à</span><br><strong>${client.name}</strong>${client.address ? html`<br>${client.address}` : ''}${client.phone ? html`<br>Tél. ${client.phone}` : ''}
+    <div class="inv-client"><span class="small muted">${DOC[kind].to}</span><br><strong>${client.name}</strong>${client.address ? html`<br>${client.address}` : ''}${client.phone ? html`<br>Tél. ${client.phone}` : ''}
       ${fiscalIds(client) ? html`<br><span class="small">${fiscalIds(client)}</span>` : ''}</div>
     <table><thead><tr><th>Désignation</th><th class="num">Qté</th><th class="num">Prix unitaire</th><th class="num">Montant</th></tr></thead><tbody>
-      ${inv.lines.map((l) => html`<tr><td>${l.name}</td><td class="num">${num.format(l.qty)}</td><td class="num">${ar(l.price)}</td><td class="num">${ar(l.price * l.qty)}</td></tr>`)}
+      ${doc.lines.map((l) => html`<tr><td>${l.name}</td><td class="num">${num.format(l.qty)}</td><td class="num">${ar(l.price)}</td><td class="num">${ar(l.price * l.qty)}</td></tr>`)}
     </tbody></table>
     <div class="inv-totals">
-      ${inv.discount ? html`<div class="totals"><span>Sous-total</span><span class="num">${ar(inv.subtotal)}</span></div><div class="totals"><span>Remise</span><span class="num">-${ar(inv.discount)}</span></div>` : ''}
-      ${inv.vat ? html`<div class="totals"><span>Total HT</span><span class="num">${ar(inv.vat.base)}</span></div><div class="totals"><span>TVA ${inv.vat.rate * 100} %</span><span class="num">${ar(inv.vat.amount)}</span></div>` : ''}
-      <div class="totals grand"><span>${inv.vat ? 'Total TTC' : 'Total'}</span><span class="num">${ar(inv.total)}</span></div>
+      ${doc.discount ? html`<div class="totals"><span>Sous-total</span><span class="num">${ar(doc.subtotal)}</span></div><div class="totals"><span>Remise</span><span class="num">-${ar(doc.discount)}</span></div>` : ''}
+      ${doc.vat ? html`<div class="totals"><span>Total HT</span><span class="num">${ar(doc.vat.base)}</span></div><div class="totals"><span>TVA ${doc.vat.rate * 100} %</span><span class="num">${ar(doc.vat.amount)}</span></div>` : ''}
+      <div class="totals grand"><span>${kind === 'avoir' ? 'Montant de l’avoir' : doc.vat ? 'Total TTC' : 'Total'}</span><span class="num">${ar(doc.total)}</span></div>
     </div>
-    <p>Arrêtée la présente facture à la somme de : <strong>${inv.words[0].toUpperCase() + inv.words.slice(1)}</strong>.</p>
-    <p class="small">Règlement : ${inv.payment}${inv.vat ? '' : ' · TVA non applicable'}</p>
+    <p>${DOC[kind].stop} à la somme de : <strong>${doc.words[0].toUpperCase() + doc.words.slice(1)}</strong>.</p>
+    <p class="small">${kind === 'facture' ? `Règlement : ${doc.payment}` : kind === 'avoir' ? `Motif : ${doc.reason}` : 'Prix fermes jusqu’à la date de validité.'}${doc.vat ? '' : ' · TVA non applicable'}</p>
     ${shop.footer ? html`<p class="small muted">${shop.footer}</p>` : ''}
   </div>
-  <div class="row"><button class="btn" data-act="closeDlg">Fermer</button><button class="btn primary" data-act="print">Imprimer / PDF</button></div>`;
+  <div class="row"><button class="btn" data-act="closeDlg">Fermer</button>
+    ${kind === 'devis' && !doc.saleId ? html`<button class="btn" data-act="quoteToSale" data-id="${doc.id}">Encaisser ce devis</button>` : ''}
+    <button class="btn primary" data-act="print">Imprimer / PDF</button></div>`;
   if (!dlg.open) dlg.showModal();
 }
 
@@ -1020,13 +1092,37 @@ const actions = {
     const cmp = costs();
     lines.forEach((l) => { l.cost = costOf(cmp, store.get('articles', l.articleId) ?? { id: l.articleId }); });
     const { sale, movements } = buildSale({ id, number: saleNumber(), lines, discount: state.discount, payment: state.payment, depotId, partnerId: state.partnerId, by: seller(), userId: currentUser()?.id ?? null, at: Date.now() });
-    await store.write([{ c: 'sales', id, data: sale }, ...movements.map((m) => ({ c: 'movements', ...m }))]);
-    Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', posQuery: '' });
+    const quote = state.quoteId ? store.get('quotes', state.quoteId) : null;
+    const quoteChange = quote && !quote.saleId ? [{ c: 'quotes', id: quote.id, data: { ...withoutId(quote), status: 'transformé', saleId: id, saleNumber: sale.number } }] : [];
+    await store.write([{ c: 'sales', id, data: { ...sale, quoteId: quote?.id ?? null } }, ...movements.map((m) => ({ c: 'movements', ...m })), ...quoteChange]);
+    Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', posQuery: '', quoteId: null });
     render();
     showTicket({ id, ...sale });
   },
   ticket: ({ id }) => showTicket(store.get('sales', id)),
   invoice: ({ id }) => invoiceForm(id),
+  creditShow: ({ id }) => showDocument(creditOf(id)),
+  creditIssue: async ({ id }) => {
+    const invoice = invoiceOf(id);
+    if (!invoice || creditOf(id)) return;
+    const credit = creditNoteFor(invoice);
+    await store.write([{ c: 'invoices', id: `${id}:av`, data: credit }]);
+    showDocument(credit);
+  },
+  salesTab: ({ tab }) => { state.salesTab = tab; render(); },
+  quoteNew: quoteForm,
+  quoteShow: ({ id }) => showDocument({ ...store.get('quotes', id), kind: 'devis' }),
+  quoteToSale: ({ id }) => {
+    const q = store.get('quotes', id);
+    if (!q) return;
+    if (state.cart.size && !confirm('Remplacer le panier en cours par ce devis ?')) return;
+    state.cart = new Map(q.lines.map((l) => [l.articleId, { ...l }]));
+    Object.assign(state, { discount: q.discount, partnerId: q.partnerId ?? '', quoteId: id });
+    $('#dlg').close();
+    location.hash = '#pos';
+    render();
+  },
+  quoteDetach: () => { state.quoteId = null; $('#cart').innerHTML = cartView(); },
   shopEdit: shopForm,
   purchaseNew: purchaseForm,
   purchaseShow: ({ id }) => showPurchase(store.get('purchases', id)),
@@ -1039,13 +1135,16 @@ const actions = {
   saleCancel: async ({ id }) => {
     const { id: _ignored, ...sale } = store.get('sales', id);
     const invoice = invoiceOf(id);
-    const warn = invoice ? `\nLa facture ${invoice.number} reste émise : remettez un avoir au client.` : '';
+    const warn = invoice ? `\nUn avoir annulera la facture ${invoice.number}.` : '';
     if (!confirm(`Annuler la vente ${sale.number} ? Le stock sera recrédité.${warn}`)) return;
+    const credit = invoice && !creditOf(id) ? creditNoteFor(invoice) : null;
     await store.write([
       { c: 'sales', id, data: { ...sale, cancelled: true } },
       ...buildCancellation(id, sale, seller(), Date.now()).map((m) => ({ c: 'movements', ...m })),
+      ...(credit ? [{ c: 'invoices', id: `${id}:av`, data: credit }] : []),
     ]);
     render();
+    if (credit) showDocument(credit);
   },
 };
 
