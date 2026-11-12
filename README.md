@@ -34,7 +34,7 @@ npm test
 2. **Ventes → Facture** (ou le bouton **Facture** du ticket) : choisir un client enregistré ou saisir son nom, puis émettre.
 3. **Imprimer / PDF** : choisir l’imprimante, ou « Enregistrer au format PDF ».
 
-La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas. Numérotation continue par appareil et par année (), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
+La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas. Numérotation continue par appareil et par année (`FA26-7A36-0001`), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
 
 ## Utilisateurs et rôles
 
