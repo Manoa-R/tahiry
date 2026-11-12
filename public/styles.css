@@ -118,7 +118,7 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
   #invoice th, #invoice td { border-bottom: 1px solid #999; }
   dialog:has(#invoice) { position: static; border: 0; padding: 0; width: auto; max-height: none; overflow: visible; background: #fff; }
 }
-@page { margin: 14mm; }
+
 
 .invoice { font-size: 14px; line-height: 1.45; }
 .invoice table { width: 100%; border-collapse: collapse; margin: 14px 0; }

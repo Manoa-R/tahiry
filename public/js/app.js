@@ -167,7 +167,7 @@ const views = {
   },
 
   scan() {
-    const a = state.scanned?.article;
+    const a = state.scanned && byCode(state.scanned.code);
     const st = stock();
     const card = !state.scanned ? html`<div class="card empty">Scannez un article pour voir son prix et son stock dans chaque dépôt.</div>`
       : !a ? html`<div class="card"><h2>Code inconnu</h2><p class="mono">${state.scanned.code}</p>
@@ -260,7 +260,7 @@ const views = {
       ${rows.map((s) => html`<tr><td class="small">${dt(s.at)}</td><td class="small">${s.number}</td><td>${s.payment}</td><td class="small">${s.by}</td>
         <td class="num">${ar(s.total)} ${s.cancelled ? html`<span class="badge danger">annulée</span>` : ''}</td>
         <td class="actions"><button class="btn small" data-act="ticket" data-id="${s.id}">Ticket</button>
-        ${s.cancelled ? '' : html`<button class="btn small" data-act="invoice" data-id="${s.id}">${invoiceOf(s.id)?.number ?? 'Facture'}</button>`}
+        ${invoiceOf(s.id) || !s.cancelled ? html`<button class="btn small" data-act="invoice" data-id="${s.id}">${invoiceOf(s.id)?.number ?? 'Facture'}</button>` : ''}
         ${s.cancelled ? '' : html`<button class="btn small danger" data-act="saleCancel" data-id="${s.id}">Annuler</button>`}</td></tr>`)}
       </tbody></table></div>`;
   },
@@ -566,6 +566,7 @@ function articleForm(a = {}) {
     ],
     onSubmit: (v) => store.save('articles', a.id ?? newId(), v),
   });
+  $('#dlg').dataset.articleId = a.id ?? '';
 }
 
 function partnerForm(p = {}) {
@@ -733,7 +734,9 @@ function invoiceForm(saleId) {
 function showInvoice(inv) {
   const { shop, client } = inv;
   const dlg = $('#dlg');
-  dlg.innerHTML = html`<div id="invoice" class="invoice wide">
+  const cancelled = store.get('sales', inv.saleId)?.cancelled;
+  dlg.innerHTML = html`${cancelled ? html`<p class="error no-print">Vente annulée après facturation : cette facture doit être annulée par un avoir.</p>` : ''}
+  <div id="invoice" class="invoice wide">
     <header class="inv-head">
       <div><strong class="inv-shop">${shop.name || 'Boutique'}</strong>${shop.address ? html`<br>${shop.address}` : ''}${shop.phone ? html`<br>Tél. ${shop.phone}` : ''}
         ${fiscalIds(shop) ? html`<br><span class="small">${fiscalIds(shop)}</span>` : ''}</div>
@@ -826,16 +829,17 @@ function addToCart(a) {
   const line = state.cart.get(a.id);
   if (line) line.qty += 1;
   else state.cart.set(a.id, { articleId: a.id, name: a.name, price: a.price || 0, qty: 1 });
-  $('#cart').innerHTML = cartView();
+  const cart = $('#cart');
+  if (cart) cart.innerHTML = cartView();
 }
 
 // --- Scan
 const SCAN_ICON = 'M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M7 8v8M10 8v8M13 8v8M17 8v8';
-const byCode = (code) => findByCode(articles(), code);
+const byCode = (code) => findByCode(store.list('articles'), code);
 const unknown = (code) => ({ ok: false, message: `Code ${code} : aucun article` });
 
 function lookupCode(code) {
-  state.scanned = { code, article: byCode(code) };
+  state.scanned = { code };
   if (route() !== 'scan') location.hash = '#scan';
   else render();
 }
@@ -845,8 +849,9 @@ function scanPurchaseCode(code) {
   if (!a) return unknown(code);
   const p = state.purchase;
   const line = p.lines.find((l) => l.articleId === a.id) ?? p.lines.find((l) => !l.articleId);
-  if (line) Object.assign(line, { articleId: a.id, qty: (Number(line.qty) || 0) + 1, cost: line.cost === '' ? (a.cost ?? '') : line.cost });
-  else p.lines.push({ articleId: a.id, qty: 1, cost: a.cost ?? '' });
+  const cost = costOf(costs(), a) || '';
+  if (line) Object.assign(line, { articleId: a.id, qty: (Number(line.qty) || 0) + 1, cost: line.cost === '' ? cost : line.cost });
+  else p.lines.push({ articleId: a.id, qty: 1, cost });
   renderPurchaseForm();
   return { ok: true, message: `${a.name} : ${num.format((line ?? p.lines.at(-1)).qty)} reçu(s)` };
 }
@@ -891,7 +896,7 @@ const actions = {
       const input = $('#dlg form').elements[field];
       input.value = code;
       const other = byCode(code);
-      return other && other.name !== $('#dlg form').elements.name?.value
+      return other && other.id !== $('#dlg').dataset.articleId
         ? { ok: false, message: `Attention : ce code est déjà celui de « ${other.name} »` }
         : { ok: true, message: code };
     },
@@ -905,7 +910,6 @@ const actions = {
       const a = store.get('articles', articleId);
       const { id, ...data } = a;
       await store.save('articles', id, { ...data, code: state.scanned.code });
-      state.scanned = { code: state.scanned.code, article: store.get('articles', id) };
     },
   }),
   scanEntry: ({ id }) => actions.moveNew({ kind: 'entree', articleId: id }),
@@ -938,7 +942,12 @@ const actions = {
     }
   },
   closeDlg: () => $('#dlg').close(),
-  print: () => window.print(),
+  print: () => {
+    const page = $('#invoice') ? Object.assign(document.createElement('style'), { textContent: '@page { margin: 14mm; }' }) : null;
+    if (page) document.head.append(page);
+    window.print();
+    page?.remove();
+  },
   demo: loadDemo,
   exportCsv,
   exportReport: exportReportCsv,
@@ -1029,7 +1038,9 @@ const actions = {
   },
   saleCancel: async ({ id }) => {
     const { id: _ignored, ...sale } = store.get('sales', id);
-    if (!confirm(`Annuler la vente ${sale.number} ? Le stock sera recrédité.`)) return;
+    const invoice = invoiceOf(id);
+    const warn = invoice ? `\nLa facture ${invoice.number} reste émise : remettez un avoir au client.` : '';
+    if (!confirm(`Annuler la vente ${sale.number} ? Le stock sera recrédité.${warn}`)) return;
     await store.write([
       { c: 'sales', id, data: { ...sale, cancelled: true } },
       ...buildCancellation(id, sale, seller(), Date.now()).map((m) => ({ c: 'movements', ...m })),
@@ -1096,7 +1107,7 @@ document.addEventListener('keydown', (e) => {
   // Une douchette envoie le code puis Entrée : correspondance exacte directe.
   if (e.key !== 'Enter' || e.target.id !== 'pos-search') return;
   const code = e.target.value.trim().toLowerCase();
-  const exact = articles().find((a) => (a.code || '').toLowerCase() === code);
+  const exact = findByCode(store.list('articles'), code);
   const list = exact ? [exact] : articles().filter((a) => a.name.toLowerCase().includes(code));
   if (code && list.length === 1) {
     addToCart(list[0]);

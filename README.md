@@ -38,7 +38,7 @@ La caméra lit les codes EAN-13, EAN-8, UPC, Code 128, Code 39, ITF, Codabar, QR
 | **Scanner** (menu) | Fiche de l'article : prix, stock par dépôt, coût moyen ; si le code est inconnu, le gérant crée l'article ou attribue le code à un article existant |
 | **Caisse → Scanner** | Ajoute une unité au panier, en continu |
 | **Inventaire → Compter au scanner** | Compte une unité de plus, en continu |
-| **Réception fournisseur → Scanner** | Ajoute une unité reçue, au dernier coût connu |
+| **Réception fournisseur → Scanner** | Ajoute une unité reçue, au coût moyen actuel |
 | **Articles → Scanner**, fiche article | Ouvre l'article ou en crée un avec ce code ; remplit le champ code-barres |
 
 Tant qu'un code reste devant la caméra, il ne compte qu'une fois : écarter l'article une seconde pour compter le suivant. Un bip aigu confirme, un bip grave signale un code inconnu. Un même produit lu en UPC-A ou en EAN-13 est reconnu. Sans caméra, saisir le code ou utiliser une douchette dans le même écran.
@@ -51,7 +51,7 @@ La caméra demande l'app Android, HTTPS ou `localhost` ; dans un navigateur ouve
 2. **Ventes → Facture** (ou le bouton **Facture** du ticket) : choisir un client enregistré ou saisir son nom, puis émettre.
 3. **Imprimer / PDF** : choisir l’imprimante, ou « Enregistrer au format PDF ».
 
-La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas. Numérotation continue par appareil et par année (`FA26-7A36-0001`), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
+La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas ; annuler une vente déjà facturée laisse la facture consultable, signalée « à annuler par un avoir ». Numérotation continue par appareil et par année (`FA26-7A36-0001`), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
 
 ## Utilisateurs et rôles
 
@@ -119,4 +119,6 @@ L'APK est une version de débogage, à installer à la main ; une publication su
 - Tout est chargé en mémoire : adapté à une boutique, pas à des millions de mouvements.
 - App Android hors Play Store (APK de débogage) ; pas encore d'app iOS.
 - Pas d’avoirs, de devis, de comptabilité, de paie, ni de bons de commande fournisseurs (seulement les réceptions).
+- Deux appareils qui facturent la même vente hors ligne : une seule facture est gardée après synchro (facturer depuis un seul poste).
+- Un appareil plus récent que le serveur garde en attente les données que le serveur ne connaît pas encore (factures, réglages…), jusqu’à la mise à jour du serveur.
 - Les ventes enregistrées avant l'ajout du coût figé ont une marge surestimée (signalé dans les rapports).
