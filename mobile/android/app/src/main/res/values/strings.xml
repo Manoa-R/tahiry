@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Tahiry</string>
+    <string name="title_activity_main">Tahiry</string>
+    <string name="package_name">mg.tahiry.app</string>
+    <string name="custom_url_scheme">mg.tahiry.app</string>
+</resources>

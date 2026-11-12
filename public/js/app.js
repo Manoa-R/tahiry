@@ -2,7 +2,7 @@
 import { store } from './store.js';
 import {
   syncNow, startSync, syncState, onSyncState, registerDevice, loginOnline, verifyShopKey, useAdminKey, hasSession,
-  listDevices, revokeDevice, defaultDeviceLabel,
+  listDevices, revokeDevice, defaultDeviceLabel, isNative, normalizeServerUrl,
 } from './sync.js';
 import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
@@ -250,7 +250,7 @@ const views = {
       <section class="card"><h2>Synchronisation</h2><form id="sync-form">
         <label class="field"><span>Nom du vendeur sur cet appareil</span><input name="seller" value="${m.seller ?? ''}" autocomplete="off"></label>
         <label class="field"><span>Nom de cet appareil (visible par le gérant)</span><input name="deviceLabel" value="${m.deviceLabel ?? ''}" placeholder="${defaultDeviceLabel()}" maxlength="60" autocomplete="off"></label>
-        <label class="field"><span>Adresse du serveur (vide = ce site)</span><input name="serverUrl" type="url" value="${m.serverUrl ?? ''}" placeholder="${location.origin}" autocomplete="off"></label>
+        <label class="field"><span>${isNative ? 'Adresse du serveur de la boutique' : 'Adresse du serveur (vide = ce site)'}</span><input name="serverUrl" inputmode="url" value="${m.serverUrl ?? ''}" placeholder="${isNative ? 'http://192.168.1.10:8787' : location.origin}" autocomplete="off" ${isNative ? 'required' : ''}></label>
         <label class="field"><span>${m.deviceToken ? 'Clé boutique (pour réenregistrer l’appareil)' : 'Clé boutique'}</span><input name="token" type="password" autocomplete="off" placeholder="${m.deviceToken || m.token ? 'Enregistrée — laisser vide pour conserver' : 'Clé affichée par le serveur'}"></label>
         <p class="muted small">${m.deviceToken ? 'Appareil enregistré : la clé boutique n’est pas conservée.' : m.token ? 'Clé boutique conservée (aucun utilisateur pour l’instant).' : 'Appareil non relié à un serveur.'}</p>
         <div class="row"><button class="btn primary" type="submit">Enregistrer et synchroniser</button></div></form>
@@ -938,7 +938,7 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = e.target.elements;
   const key = f.token.value.trim();
-  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: f.serverUrl.value.trim(), deviceLabel: f.deviceLabel.value.trim() });
+  await store.setMeta({ seller: f.seller.value.trim(), serverUrl: normalizeServerUrl(f.serverUrl.value), deviceLabel: f.deviceLabel.value.trim() });
   if (key) {
     try {
       // Avec des utilisateurs, la clé ne fait qu'enregistrer l'appareil ; sinon elle est gardée.
@@ -973,4 +973,5 @@ resetIdle();
 startSync();
 // Demande au navigateur de ne pas purger les données locales.
 navigator.storage?.persist?.();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+// L'app Android embarque déjà ses fichiers : pas besoin de service worker.
+if ('serviceWorker' in navigator && !isNative) navigator.serviceWorker.register('sw.js');

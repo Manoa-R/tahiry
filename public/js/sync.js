@@ -25,7 +25,15 @@ function setState(status, message = '') {
   notify();
 }
 
-const serverUrl = () => (store.meta.serverUrl || location.origin).replace(/\/$/, '');
+// Dans l'app Android (Capacitor), la page est embarquée : l'adresse du serveur doit être saisie.
+export const isNative = Boolean(globalThis.Capacitor?.isNativePlatform?.());
+const serverUrl = () => (store.meta.serverUrl || (isNative ? '' : location.origin)).replace(/\/$/, '');
+
+// « 192.168.1.10:8787 » devient « http://192.168.1.10:8787 ».
+export function normalizeServerUrl(value) {
+  const v = value.trim().replace(/\/+$/, '');
+  return !v || /^https?:\/\//i.test(v) ? v : `http://${v}`;
+}
 const credential = () => adminKey || store.meta.deviceToken || store.meta.token;
 const isAdmin = () => Boolean(adminKey || (!store.meta.deviceToken && store.meta.token));
 const hasUsers = () => store.list('users').some((u) => u.active !== false);
@@ -116,6 +124,7 @@ async function dropSessions(authors) {
 }
 
 async function run() {
+  if (!serverUrl()) return setState('unconfigured', 'Adresse du serveur à saisir');
   if (!credential()) return setState(store.meta.revokedAt ? 'error' : 'unconfigured', 'Appareil révoqué');
   if (!navigator.onLine) return setState('offline');
   setState('syncing');

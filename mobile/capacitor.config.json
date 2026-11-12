@@ -1,0 +1,7 @@
+{
+  "appId": "mg.tahiry.app",
+  "appName": "Tahiry",
+  "webDir": "../public",
+  "server": { "androidScheme": "https", "cleartext": true },
+  "android": { "allowMixedContent": true }
+}

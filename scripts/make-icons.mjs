@@ -37,3 +37,13 @@ function png(size) {
 
 mkdirSync('public/icons', { recursive: true });
 for (const size of [192, 512]) writeFileSync(`public/icons/icon-${size}.png`, png(size));
+
+// Icônes de l'app Android (mobile/android) : l'icône complète sert de premier plan adaptatif.
+const res = 'mobile/android/app/src/main/res';
+const densities = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
+for (const [name, k] of Object.entries(densities)) {
+  mkdirSync(`${res}/mipmap-${name}`, { recursive: true });
+  writeFileSync(`${res}/mipmap-${name}/ic_launcher.png`, png(48 * k));
+  writeFileSync(`${res}/mipmap-${name}/ic_launcher_round.png`, png(48 * k));
+  writeFileSync(`${res}/mipmap-${name}/ic_launcher_foreground.png`, png(108 * k));
+}
