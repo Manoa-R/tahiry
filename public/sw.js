@@ -1,9 +1,10 @@
 // Service worker : réseau d'abord (avec délai court), cache sinon.
 // L'API de synchronisation n'est jamais mise en cache.
-const CACHE = 'tahiry-shell-v7';
+const CACHE = 'tahiry-shell-v8';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/store.js', 'js/sync.js', 'js/domain.js',
+  'js/app.js', 'js/store.js', 'js/sync.js', 'js/domain.js', 'js/scanner.js',
+  'vendor/barcode-detector.js', 'vendor/zxing_reader.wasm',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 const NETWORK_WAIT = 2500;
