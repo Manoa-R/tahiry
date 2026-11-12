@@ -30,8 +30,15 @@ test('refuse une clé invalide', () => withServer(async ({ sync }) => {
 }));
 
 test('refuse un lot invalide', () => withServer(async ({ sync }) => {
-  assert.equal((await sync({ changes: [{ c: 'inconnu', id: 'x', hlc: '1', data: {} }] })).status, 400);
+  assert.equal((await sync({ changes: [{ c: 'inconnu', id: 'x', hlc: '1', data: [] }] })).status, 400);
   assert.equal((await sync({ cursor: -1 })).status, 400);
+}));
+
+test('une collection inconnue du serveur est mise de côté sans bloquer le reste', () => withServer(async ({ sync }) => {
+  const { status, body } = await sync({ changes: [{ c: 'futur', id: 'x', hlc: '1', data: {} }, art('a', '0000000000001-000000-a', 'Riz')] });
+  assert.equal(status, 200);
+  assert.deepEqual(body.deferred, [{ c: 'futur', id: 'x', author: null, unsupported: true }]);
+  assert.ok(body.changes.some((c) => c.id === 'a'));
 }));
 
 test('deux appareils convergent : le dernier écrivain gagne, quel que soit l’ordre', () => withServer(async ({ sync }) => {

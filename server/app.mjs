@@ -51,7 +51,7 @@ function openDb(path) {
 }
 
 function validChange(ch) {
-  return ch && COLLECTIONS.has(ch.c)
+  return ch && typeof ch.c === 'string' && ch.c.length > 0 && ch.c.length <= 64
     && typeof ch.id === 'string' && ch.id.length > 0 && ch.id.length <= 128
     && typeof ch.hlc === 'string' && ch.hlc.length <= 128
     && (ch.author === undefined || ch.author === null || (typeof ch.author === 'string' && ch.author.length <= 128))
@@ -155,6 +155,9 @@ export function createSyncStore(dbPath) {
       try {
         let seq = maxSeq.get().s;
         for (const ch of changes) {
+          // Collection inconnue (appareil plus récent que le serveur) : mise de côté, renvoyée
+          // après la mise à jour du serveur, sans bloquer le reste de la synchro.
+          if (!COLLECTIONS.has(ch.c)) { deferred.push({ c: ch.c, id: ch.id, author: null, unsupported: true }); continue; }
           const existing = find.get(ch.c, ch.id);
           // Rejeu ou version plus ancienne : sans effet, donc jamais refusé.
           if (existing && (IMMUTABLE.has(ch.c) || ch.hlc <= existing.hlc)) continue;

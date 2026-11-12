@@ -143,7 +143,8 @@ async function run() {
       const deferred = new Set((reply.deferred ?? []).map((d) => `${d.c}/${d.id}`));
       await store.acknowledge(batch.filter((r) => !deferred.has(r.key)));
       await store.applyRejected(reply.rejected ?? []);
-      await dropSessions(new Set((reply.deferred ?? []).map((d) => d.author)));
+      // Session refusée : on l'oublie pour redemander le PIN (pas pour un changement que le serveur ne connaît pas encore).
+      await dropSessions(new Set((reply.deferred ?? []).map((d) => d.author).filter(Boolean)));
       syncState.held += deferred.size;
       rejected.push(...(reply.rejected ?? []));
       await store.applyRemote(reply.changes, reply.cursor);
