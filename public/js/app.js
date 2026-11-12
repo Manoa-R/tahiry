@@ -8,6 +8,7 @@ import {
   newId, computeStock, stockAt, stockTotal, saleTotals, buildSale, buildCancellation,
   buildTransfer, buildInventory, averageCosts, costOf, buildPurchase, salesReport,
   ROLES, SELLER_ROUTES, makeCredentials, checkPin, validatePin, assertKeepsManager,
+  buildInvoice, nextInvoiceNumber,
 } from './domain.js';
 
 // --- Rendu : toute valeur interpolée est échappée, y compris les données synchronisées.
@@ -66,7 +67,7 @@ const allowedRoute = (r) => isManager() || SELLER_ROUTES.has(r);
 const MANAGER_ACTIONS = new Set([
   'demo', 'articleNew', 'articleEdit', 'articleDelete', 'partnerNew', 'partnerEdit', 'partnerDelete', 'depotNew', 'depotEdit',
   'moveNew', 'transferNew', 'inventorySave', 'saleCancel', 'purchaseNew', 'userNew', 'userEdit', 'userToggle', 'exportReport',
-  'devicesLoad', 'deviceRevoke',
+  'devicesLoad', 'deviceRevoke', 'shopEdit',
 ]);
 const LOCKED_ACTIONS = new Set(['pickUser', 'forgotPin', 'lockBack', 'sync']);
 const seller = () => currentUser()?.name || store.meta.seller || 'Appareil';
@@ -230,6 +231,7 @@ const views = {
       ${rows.map((s) => html`<tr><td class="small">${dt(s.at)}</td><td class="small">${s.number}</td><td>${s.payment}</td><td class="small">${s.by}</td>
         <td class="num">${ar(s.total)} ${s.cancelled ? html`<span class="badge danger">annulée</span>` : ''}</td>
         <td class="actions"><button class="btn small" data-act="ticket" data-id="${s.id}">Ticket</button>
+        ${s.cancelled ? '' : html`<button class="btn small" data-act="invoice" data-id="${s.id}">${invoiceOf(s.id)?.number ?? 'Facture'}</button>`}
         ${s.cancelled ? '' : html`<button class="btn small danger" data-act="saleCancel" data-id="${s.id}">Annuler</button>`}</td></tr>`)}
       </tbody></table></div>`;
   },
@@ -264,6 +266,7 @@ const views = {
         <div class="row"><button class="btn" data-act="userNew">${usersEnabled() ? 'Ajouter un utilisateur' : 'Créer le premier gérant'}</button></div>
         <p class="muted small">Les codes PIN contrôlent l’accès entre collègues ; ils ne chiffrent pas les données de l’appareil.</p></section>
       ${(m.deviceToken || m.token) && usersEnabled() ? devicesSection() : ''}
+      ${shopSection()}
       <section class="card"><h2>Dépôts</h2>${depots().map((d) => html`<div class="totals"><span>${d.name}</span><button class="btn small" data-act="depotEdit" data-id="${d.id}">Renommer</button></div>`)}
         <div class="row"><button class="btn" data-act="depotNew">Ajouter un dépôt</button></div></section>
       <section class="card"><h2>Application</h2><div class="row" style="justify-content:flex-start">
@@ -544,6 +547,9 @@ function partnerForm(p = {}) {
       { name: 'name', label: 'Nom', required: true },
       { name: 'kind', label: 'Type', type: 'select', options: [{ value: 'client', label: 'Client' }, { value: 'fournisseur', label: 'Fournisseur' }] },
       { name: 'phone', label: 'Téléphone', type: 'tel' },
+      { name: 'address', label: 'Adresse (facultatif)' },
+      { name: 'nif', label: 'NIF (facultatif)' },
+      { name: 'stat', label: 'STAT (facultatif)' },
     ],
     onSubmit: (v) => store.save('partners', p.id ?? newId(), v),
   });
@@ -624,9 +630,103 @@ function showTicket(sale) {
     <div class="line"><span>Paiement</span><span>${sale.payment}</span></div>
     <div class="line"><span>Vendeur</span><span>${sale.by}</span></div>
     ${sale.cancelled ? html`<p class="center"><strong>VENTE ANNULÉE</strong></p>` : ''}</div>
-    <div class="row"><button class="btn" data-act="closeDlg">Fermer</button><button class="btn primary" data-act="print">Imprimer</button></div>`;
+    <div class="row"><button class="btn" data-act="closeDlg">Fermer</button>
+    ${sale.cancelled || !sale.id ? '' : html`<button class="btn" data-act="invoice" data-id="${sale.id}">Facture</button>`}
+    <button class="btn primary" data-act="print">Imprimer</button></div>`;
   dlg.showModal();
 }
+
+// --- Factures
+const shopProfile = () => store.get('settings', 'shop') ?? {};
+const invoiceOf = (saleId) => store.get('invoices', `${saleId}:f`);
+const fiscalIds = (o) => [o.nif && `NIF : ${o.nif}`, o.stat && `STAT : ${o.stat}`, o.rcs && `RCS : ${o.rcs}`].filter(Boolean).join(' · ');
+
+function shopSection() {
+  const shop = shopProfile();
+  return html`<section class="card"><h2>Fiche boutique</h2>
+    ${shop.name ? html`<p><strong>${shop.name}</strong><br><span class="muted small">${[shop.address, fiscalIds(shop)].filter(Boolean).join(' · ')}</span></p>`
+      : html`<p class="muted small">Raison sociale, adresse, NIF et STAT : ils apparaissent en tête des factures.</p>`}
+    <p class="muted small">TVA : ${shop.vat ? 'assujetti, 20 % incluse dans les prix' : 'non assujetti'}</p>
+    <div class="row"><button class="btn" data-act="shopEdit">Modifier la fiche boutique</button></div></section>`;
+}
+
+function shopForm() {
+  const shop = shopProfile();
+  openForm({
+    title: 'Fiche boutique',
+    values: { ...shop, vat: shop.vat ? 'oui' : 'non' },
+    fields: [
+      { name: 'name', label: 'Raison sociale', required: true },
+      { name: 'address', label: 'Adresse' },
+      { name: 'phone', label: 'Téléphone', type: 'tel' },
+      { name: 'nif', label: 'NIF' },
+      { name: 'stat', label: 'STAT' },
+      { name: 'rcs', label: 'RCS (facultatif)' },
+      { name: 'vat', label: 'TVA', type: 'select', options: [{ value: 'non', label: 'Non assujetti' }, { value: 'oui', label: 'Assujetti — TVA 20 % incluse dans les prix' }] },
+      { name: 'footer', label: 'Mention en bas de facture (facultatif)' },
+    ],
+    onSubmit: (v) => store.save('settings', 'shop', { ...v, vat: v.vat === 'oui' }),
+  });
+}
+
+// Émettre une facture : on choisit le client, puis la facture est figée et numérotée.
+function invoiceForm(saleId) {
+  const existing = invoiceOf(saleId);
+  if (existing) return showInvoice(existing);
+  const sale = store.get('sales', saleId);
+  if (!sale || sale.cancelled) return;
+  if (usersEnabled() && !isManager() && sale.userId !== currentUser()?.id) {
+    alert('Seuls le gérant et la personne qui a fait la vente peuvent la facturer.');
+    return;
+  }
+  const dlg = $('#dlg');
+  dlg.innerHTML = html`<form id="invoice-form"><h2>Facturer la vente ${sale.number}</h2>
+    ${shopProfile().name ? '' : html`<p class="error">La fiche boutique est vide : le gérant peut la remplir dans Réglages.</p>`}
+    <label class="field"><span>Client enregistré</span><select name="partnerId"><option value="">—</option>${options(partners('client'), sale.partnerId)}</select></label>
+    <label class="field"><span>Ou nom du client</span><input name="clientName" autocomplete="off" placeholder="Client de passage"></label>
+    <p class="muted small">Total ${ar(sale.total)}. Une fois émise, la facture ne peut plus être modifiée.</p>
+    <div class="row"><button class="btn" type="button" data-act="closeDlg">Annuler</button><button class="btn primary" type="submit">Émettre la facture</button></div></form>`;
+  dlg.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    const partner = f.partnerId.value ? store.get('partners', f.partnerId.value) : null;
+    const client = partner ?? (f.clientName.value.trim() ? { name: f.clientName.value.trim() } : null);
+    const tag = store.meta.deviceId.slice(0, 4).toUpperCase();
+    const number = nextInvoiceNumber(store.list('invoices').map((i) => i.number), tag, new Date().getFullYear());
+    const invoice = buildInvoice({ number, saleId, sale, client, shop: shopProfile(), by: seller(), at: Date.now() });
+    await store.write([{ c: 'invoices', id: `${saleId}:f`, data: invoice }]);
+    showInvoice(invoice);
+  });
+  if (!dlg.open) dlg.showModal();
+}
+
+function showInvoice(inv) {
+  const { shop, client } = inv;
+  const dlg = $('#dlg');
+  dlg.innerHTML = html`<div id="invoice" class="invoice wide">
+    <header class="inv-head">
+      <div><strong class="inv-shop">${shop.name || 'Boutique'}</strong>${shop.address ? html`<br>${shop.address}` : ''}${shop.phone ? html`<br>Tél. ${shop.phone}` : ''}
+        ${fiscalIds(shop) ? html`<br><span class="small">${fiscalIds(shop)}</span>` : ''}</div>
+      <div class="inv-title"><strong>FACTURE</strong><br>N° ${inv.number}<br>Date : ${new Date(inv.at).toLocaleDateString('fr-FR')}<br><span class="small">Vente ${inv.saleNumber}</span></div>
+    </header>
+    <div class="inv-client"><span class="small muted">Facturé à</span><br><strong>${client.name}</strong>${client.address ? html`<br>${client.address}` : ''}${client.phone ? html`<br>Tél. ${client.phone}` : ''}
+      ${fiscalIds(client) ? html`<br><span class="small">${fiscalIds(client)}</span>` : ''}</div>
+    <table><thead><tr><th>Désignation</th><th class="num">Qté</th><th class="num">Prix unitaire</th><th class="num">Montant</th></tr></thead><tbody>
+      ${inv.lines.map((l) => html`<tr><td>${l.name}</td><td class="num">${num.format(l.qty)}</td><td class="num">${ar(l.price)}</td><td class="num">${ar(l.price * l.qty)}</td></tr>`)}
+    </tbody></table>
+    <div class="inv-totals">
+      ${inv.discount ? html`<div class="totals"><span>Sous-total</span><span class="num">${ar(inv.subtotal)}</span></div><div class="totals"><span>Remise</span><span class="num">-${ar(inv.discount)}</span></div>` : ''}
+      ${inv.vat ? html`<div class="totals"><span>Total HT</span><span class="num">${ar(inv.vat.base)}</span></div><div class="totals"><span>TVA ${inv.vat.rate * 100} %</span><span class="num">${ar(inv.vat.amount)}</span></div>` : ''}
+      <div class="totals grand"><span>${inv.vat ? 'Total TTC' : 'Total'}</span><span class="num">${ar(inv.total)}</span></div>
+    </div>
+    <p>Arrêtée la présente facture à la somme de : <strong>${inv.words[0].toUpperCase() + inv.words.slice(1)}</strong>.</p>
+    <p class="small">Règlement : ${inv.payment}${inv.vat ? '' : ' · TVA non applicable'}</p>
+    ${shop.footer ? html`<p class="small muted">${shop.footer}</p>` : ''}
+  </div>
+  <div class="row"><button class="btn" data-act="closeDlg">Fermer</button><button class="btn primary" data-act="print">Imprimer / PDF</button></div>`;
+  if (!dlg.open) dlg.showModal();
+}
+
 
 async function loadDemo() {
   const items = [
@@ -805,9 +905,11 @@ const actions = {
     await store.write([{ c: 'sales', id, data: sale }, ...movements.map((m) => ({ c: 'movements', ...m }))]);
     Object.assign(state, { cart: new Map(), discount: 0, partnerId: '', posQuery: '' });
     render();
-    showTicket(sale);
+    showTicket({ id, ...sale });
   },
   ticket: ({ id }) => showTicket(store.get('sales', id)),
+  invoice: ({ id }) => invoiceForm(id),
+  shopEdit: shopForm,
   purchaseNew: purchaseForm,
   purchaseShow: ({ id }) => showPurchase(store.get('purchases', id)),
   purchaseAddLine: () => { state.purchase.lines.push({ articleId: '', qty: '', cost: '' }); renderPurchaseForm(); },

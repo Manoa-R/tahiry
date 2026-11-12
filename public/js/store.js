@@ -3,7 +3,7 @@
 import { createClock, newId } from './domain.js';
 
 const DB_NAME = 'tahiry';
-export const COLLECTIONS = ['articles', 'depots', 'partners', 'movements', 'sales', 'purchases', 'users'];
+export const COLLECTIONS = ['articles', 'depots', 'partners', 'movements', 'sales', 'purchases', 'users', 'invoices', 'settings'];
 
 const done = (tx) => new Promise((ok, fail) => {
   tx.oncomplete = () => ok();

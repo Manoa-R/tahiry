@@ -112,9 +112,23 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 @media print {
   body * { visibility: hidden; }
   dialog::backdrop { background: none; }
-  #ticket, #ticket * { visibility: visible; color: #000; }
+  #ticket, #ticket *, #invoice, #invoice * { visibility: visible; color: #000; }
   #ticket { position: fixed; left: 0; top: 0; width: 72mm; }
+  #invoice { position: absolute; left: 0; top: 0; width: 100%; font-size: 11pt; }
+  #invoice th, #invoice td { border-bottom: 1px solid #999; }
+  dialog:has(#invoice) { position: static; border: 0; padding: 0; width: auto; max-height: none; overflow: visible; background: #fff; }
 }
+@page { margin: 14mm; }
+
+.invoice { font-size: 14px; line-height: 1.45; }
+.invoice table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+.invoice th { text-align: left; }
+.inv-head { display: flex; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--line); }
+.inv-shop { font-size: 18px; }
+.inv-title { text-align: right; }
+.inv-title strong { font-size: 20px; letter-spacing: .06em; }
+.inv-client { margin: 14px 0 0 auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; width: min(320px, 100%); }
+.inv-totals { margin-left: auto; width: min(320px, 100%); }
 
 dialog:has(.wide) { width: min(720px, calc(100vw - 32px)); }
 dialog td select, dialog td input { min-width: 70px; }

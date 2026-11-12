@@ -20,12 +20,21 @@ npm test
 
 - Tableau de bord : ventes du jour, valeur du stock au coût moyen, alertes
 - Caisse : recherche, douchette, remise, Espèces / MVola / Orange Money / Airtel Money, ticket imprimable
+- Factures A4 depuis une vente : en-tête boutique (NIF, STAT, RCS), client, TVA 20 % en option, montant en lettres, impression ou PDF
 - Articles, catégories, seuils, export CSV
 - Achats : réceptions fournisseurs multi-lignes, coût moyen pondéré (CUMP)
 - Mouvements : entrées valorisées, sorties, transferts multi-dépôts
 - Inventaire avec écarts, annulation de vente, clients et fournisseurs
 - Rapports : chiffre d'affaires, marge, panier moyen, paiements, vendeurs, articles, par période, export CSV
 - Utilisateurs : rôles gérant / vendeur, code PIN, verrouillage après 15 min d'inactivité
+
+## Factures
+
+1. **Réglages → Fiche boutique** (gérant) : raison sociale, adresse, NIF, STAT, RCS, TVA et mention de bas de page.
+2. **Ventes → Facture** (ou le bouton **Facture** du ticket) : choisir un client enregistré ou saisir son nom, puis émettre.
+3. **Imprimer / PDF** : choisir l’imprimante, ou « Enregistrer au format PDF ».
+
+La facture est figée à l’émission : modifier ensuite un prix, un client ou la fiche boutique ne la change pas. Une vente ne donne qu’une facture, et une vente annulée n’en donne pas. Numérotation continue par appareil et par année (), car les appareils facturent hors ligne. Avec la TVA, les prix de vente sont considérés TTC et la facture en déduit le HT. Le vendeur peut facturer ses propres ventes ; le serveur refuse une facture dont les montants diffèrent de la vente.
 
 ## Utilisateurs et rôles
 
@@ -92,5 +101,5 @@ L'APK est une version de débogage, à installer à la main ; une publication su
 - Une horloge d'appareil très en avance peut gagner les conflits de « dernière écriture ».
 - Tout est chargé en mémoire : adapté à une boutique, pas à des millions de mouvements.
 - App Android hors Play Store (APK de débogage) ; pas encore d'app iOS.
-- Pas de facturation PDF, comptabilité, paie, ni bons de commande fournisseurs (seulement les réceptions).
+- Pas d’avoirs, de devis, de comptabilité, de paie, ni de bons de commande fournisseurs (seulement les réceptions).
 - Les ventes enregistrées avant l'ajout du coût figé ont une marge surestimée (signalé dans les rapports).
