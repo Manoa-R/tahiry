@@ -39,7 +39,7 @@ async function shop(fn) {
 
 const sale = (id, userId, extra = {}) => ({
   c: 'sales', id, hlc: '5-0-d', author: userId,
-  data: { number: id, userId, depotId: 'd', cancelled: false, lines: [{ articleId: 'riz', qty: 2, price: 4000 }], ...extra },
+  data: { number: id, userId, depotId: 'd', cancelled: false, total: 8000, lines: [{ articleId: 'riz', qty: 2, price: 4000 }], ...extra },
 });
 const exit = (saleId, userId, qty = -2, i = 0) => ({
   c: 'movements', id: `${saleId}:v:${i}`, hlc: '5-0-d', author: userId,
@@ -144,4 +144,27 @@ test('un appareil révoqué perd l’accès et ses sessions, les autres continue
   assert.equal((await post('/api/sync', {}, phone.body.deviceToken)).status, 200);
   const after = (await post('/api/devices/list', {}, ADMIN)).body.devices;
   assert.equal(after.find((d) => d.id === caisse).revoked, true);
+}));
+
+test('le vendeur facture sa vente sans pouvoir en changer les montants', () => shop(async ({ post, device, login }) => {
+  const s = (await login('v', '2222')).body.sessionToken;
+  const invoice = (saleId, extra = {}) => ({
+    c: 'invoices', id: `${saleId}:f`, hlc: '6-0-d', author: 'v',
+    data: { number: 'FA26-X-0001', saleId, total: 8000, lines: [{ articleId: 'riz', qty: 2, price: 4000 }], ...extra },
+  });
+  await post('/api/sync', { sessions: { v: s }, changes: [sale('s1', 'v')] }, device);
+  const r = await post('/api/sync', {
+    sessions: { v: s },
+    changes: [
+      invoice('s1', { total: 800 }),
+      { ...invoice('s1'), id: 'autre' },
+      { c: 'settings', id: 'shop', hlc: '6-0-d', author: 'v', data: { name: 'Pirate' } },
+    ],
+  }, device);
+  assert.deepEqual(r.body.rejected.map((x) => `${x.c}/${x.id}`), ['invoices/s1:f', 'invoices/autre', 'settings/shop']);
+  const ok = await post('/api/sync', { sessions: { v: s }, changes: [invoice('s1')] }, device);
+  assert.deepEqual(ok.body.rejected, []);
+  assert.ok(ok.body.changes.some((c) => c.id === 's1:f' && c.data.total === 8000));
+  const again = await post('/api/sync', { sessions: { v: s }, changes: [{ ...invoice('s1'), hlc: '7-0-d' }] }, device);
+  assert.deepEqual(again.body.rejected.map((x) => x.id), ['s1:f']);
 }));

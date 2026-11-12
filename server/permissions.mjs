@@ -36,5 +36,17 @@ export function refusal(change, author, lookup, batchSales) {
     return null;
   }
 
+  // Le vendeur peut facturer sa propre vente, une seule fois, sans en changer les montants.
+  if (change.c === 'invoices') {
+    if (lookup('invoices', change.id)) return 'Modification d’une facture réservée au gérant';
+    const inv = change.data;
+    if (change.id !== `${inv.saleId}:f`) return 'Facture mal identifiée';
+    const sale = batchSales.get(inv.saleId) ?? lookup('sales', inv.saleId);
+    if (!sale || sale.userId !== author.userId || sale.cancelled) return 'Facture sans vente de cet utilisateur';
+    const same = inv.total === sale.total && Array.isArray(inv.lines) && inv.lines.length === sale.lines.length
+      && inv.lines.every((l, i) => l.articleId === sale.lines[i].articleId && l.qty === sale.lines[i].qty && l.price === sale.lines[i].price);
+    return same ? null : 'Facture différente de la vente';
+  }
+
   return 'Action réservée au gérant';
 }

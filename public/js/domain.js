@@ -214,3 +214,68 @@ export function assertKeepsManager(users, changedId, next) {
     throw new Error('Il doit rester au moins un gérant actif');
   }
 }
+
+// --- Factures
+
+const UNITS = ['zéro', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix',
+  'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize'];
+const TENS = ['', 'dix', 'vingt', 'trente', 'quarante', 'cinquante', 'soixante'];
+
+function below100(n) {
+  if (n <= 16) return UNITS[n];
+  if (n < 20) return `dix-${UNITS[n - 10]}`;
+  if (n < 70) {
+    const [t, u] = [Math.floor(n / 10), n % 10];
+    return u === 0 ? TENS[t] : u === 1 ? `${TENS[t]} et un` : `${TENS[t]}-${UNITS[u]}`;
+  }
+  if (n < 80) return n === 71 ? 'soixante et onze' : `soixante-${below100(n - 60)}`;
+  return n === 80 ? 'quatre-vingts' : `quatre-vingt-${below100(n - 80)}`;
+}
+
+function below1000(n) {
+  const [h, r] = [Math.floor(n / 100), n % 100];
+  if (!h) return below100(r);
+  const head = h === 1 ? 'cent' : `${UNITS[h]} cent${r ? '' : 's'}`;
+  return r ? `${head} ${below100(r)}` : head;
+}
+
+// Montant en toutes lettres (orthographe traditionnelle), pour « Arrêtée la présente facture à… ».
+export function amountInWords(value) {
+  let n = Math.round(Math.abs(value));
+  if (n === 0) return 'zéro';
+  const parts = [];
+  for (const [size, one, many] of [[1e9, 'un milliard', 'milliards'], [1e6, 'un million', 'millions']]) {
+    const q = Math.floor(n / size);
+    if (q) parts.push(q === 1 ? one : `${below1000(q)} ${many}`);
+    n %= size;
+  }
+  const thousands = Math.floor(n / 1000);
+  if (thousands) parts.push(thousands === 1 ? 'mille' : `${below1000(thousands).replace(/cents$/, 'cent').replace(/vingts$/, 'vingt')} mille`);
+  if (n % 1000) parts.push(below1000(n % 1000));
+  return parts.join(' ');
+}
+
+export const VAT_RATE = 0.2;
+
+// Une facture est une copie figée de la vente, du client et de la boutique au moment de l'émission.
+export function buildInvoice({ number, saleId, sale, client, shop, by, at }) {
+  if (sale.cancelled) throw new Error('Une vente annulée ne peut pas être facturée');
+  const ttc = sale.total;
+  const vat = shop.vat ? Math.round(ttc - ttc / (1 + VAT_RATE)) : 0;
+  return {
+    number, saleId, saleNumber: sale.number, at, by, payment: sale.payment,
+    lines: sale.lines.map(({ articleId, name, qty, price }) => ({ articleId, name, qty, price })),
+    subtotal: sale.subtotal, discount: sale.discount, total: ttc,
+    vat: shop.vat ? { rate: VAT_RATE, amount: vat, base: ttc - vat } : null,
+    client: { name: client?.name || 'Client de passage', address: client?.address || '', phone: client?.phone || '', nif: client?.nif || '', stat: client?.stat || '' },
+    shop: { name: shop.name || '', address: shop.address || '', phone: shop.phone || '', nif: shop.nif || '', stat: shop.stat || '', rcs: shop.rcs || '', footer: shop.footer || '' },
+    words: `${amountInWords(ttc)} ariary`,
+  };
+}
+
+// Numérotation continue par appareil et par année : FA26-AB12-0001.
+export function nextInvoiceNumber(existing, tag, year) {
+  const prefix = `FA${String(year).slice(2)}-${tag}-`;
+  const max = existing.filter((n) => n.startsWith(prefix)).reduce((m, n) => Math.max(m, Number(n.slice(prefix.length)) || 0), 0);
+  return `${prefix}${String(max + 1).padStart(4, '0')}`;
+}
